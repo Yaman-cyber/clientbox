@@ -1,6 +1,6 @@
 {
   "name": "clientbox",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Pure client-side, in-browser code execution engine for JavaScript, TypeScript, Python, HTML/CSS/JS, C#, Java, PHP, Dart, and Go",
   "type": "module",
   "main": "./dist/index.cjs",
