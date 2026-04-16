@@ -714,7 +714,7 @@ require(["vs/editor/editor.main"], function() {
 
   monacoReady = true;
 
-  var cdnUrl = "https://cdn.jsdelivr.net/npm/clientbox@latest/dist/index.js";
+  var cdnUrl = "https://unpkg.com/clientbox@latest/dist/index.js";
   import(cdnUrl).then(function(mod) {
     box = new mod.ClientBox({
       timeout: 60000,
