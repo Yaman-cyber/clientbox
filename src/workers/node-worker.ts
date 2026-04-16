@@ -244,14 +244,15 @@ self.onmessage = function(e) {
     var result = '';
     var i = 0;
     var len = src.length;
+    var BT = String.fromCharCode(96);
     while (i < len) {
       // Skip string literals
-      if (src[i] === '"' || src[i] === "'" || src[i] === '` + '`' + `) {
+      if (src[i] === '"' || src[i] === "'" || src[i] === BT) {
         var q = src[i];
         result += src[i++];
         while (i < len && src[i] !== q) {
           if (src[i] === '\\\\') { result += src[i++]; if (i < len) result += src[i++]; continue; }
-          if (q === '` + '`' + ` && src[i] === '$' && src[i+1] === '{') {
+          if (q === BT && src[i] === '$' && src[i+1] === '{') {
             result += src[i++]; result += src[i++];
             var bd = 1;
             while (i < len && bd > 0) {
