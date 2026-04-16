@@ -179,7 +179,6 @@ self.onmessage = function(e) {
     // Remove enum declarations, replace with frozen object
     code = code.replace(/(?:export\\s+)?(?:const\\s+)?enum\\s+(\\w+)\\s*\\{([^}]*)\\}/g, function(_, name, body) {
       var members = body.split(',').filter(function(m) { return m.trim(); });
-      var obj = {};
       var autoVal = 0;
       var entries = members.map(function(m) {
         var parts = m.trim().split('=');
@@ -202,19 +201,9 @@ self.onmessage = function(e) {
     // Remove type imports: import type { ... } from '...'
     code = code.replace(/import\\s+type\\s+\\{[^}]*\\}\\s+from\\s+['\"][^'\"]+['\"];?/g, '');
 
-    // Remove type-only parts from mixed imports: import { type Foo, Bar } -> import { Bar }
+    // Remove type-only parts from mixed imports
     code = code.replace(/,\\s*type\\s+\\w+/g, '');
     code = code.replace(/type\\s+\\w+\\s*,\\s*/g, '');
-
-    // Remove type annotations (colon + type) before = ; , ) ] } =>
-    // Handles generics, arrays, unions, intersections, and custom types
-    code = code.replace(/:\\s*(?:[A-Za-z_$][\\w$]*(?:<[^>]*>)?(?:\\[\\])*)(?:\\s*[|&]\\s*(?:[A-Za-z_$][\\w$]*(?:<[^>]*>)?(?:\\[\\])*))*(?=\\s*[=;,)\\]}>])/g, '');
-
-    // Remove function/arrow return types: ): string { -> ) { and ): string => -> ) =>
-    code = code.replace(/\\)\\s*:\\s*(?:[A-Za-z_$][\\w$]*(?:<[^>]*>)?(?:\\[\\])*)(?:\\s*[|&]\\s*(?:[A-Za-z_$][\\w$]*(?:<[^>]*>)?(?:\\[\\])*))*(?=\\s*[{=])/g, ')');
-
-    // Remove angle-bracket type params: foo<string>( -> foo(
-    code = code.replace(/(\\w+)<[^>]+>\\s*\\(/g, '$1(');
 
     // Remove 'as Type' casts
     code = code.replace(/\\s+as\\s+(?:const|string|number|boolean|any|unknown|\\w+(?:<[^>]+>)?(?:\\[\\])*)/g, '');
@@ -222,7 +211,7 @@ self.onmessage = function(e) {
     // Remove non-null assertions: x! -> x
     code = code.replace(/(\\w+)!/g, '$1');
 
-    // Remove access modifiers: public/private/protected/readonly
+    // Remove access modifiers
     code = code.replace(/\\b(public|private|protected|readonly)\\s+/g, '');
 
     // abstract class -> class
@@ -237,7 +226,107 @@ self.onmessage = function(e) {
     // Remove angle-bracket type assertions: <Type>expr -> expr
     code = code.replace(/<(?:string|number|boolean|any|unknown|\\w+)>(?=\\w)/g, '');
 
+    // Remove generic type params from function calls/declarations: foo<T>( -> foo(
+    code = code.replace(/(\\w+)\\s*<[^>]+>\\s*\\(/g, '$1(');
+    // Remove generic declarations: function foo<T, U> -> function foo
+    code = code.replace(/(function\\s+\\w+)\\s*<[^>]+>/g, '$1');
+    // Remove class generic params: class Foo<T> -> class Foo
+    code = code.replace(/(class\\s+\\w+)\\s*<[^>]+>/g, '$1');
+
+    // Scanner-based type annotation removal for colon types
+    // Handles complex types like (T | T[])[], Map<string, number>, etc.
+    code = removeColonTypes(code);
+
     return code;
+  }
+
+  function removeColonTypes(src) {
+    var result = '';
+    var i = 0;
+    var len = src.length;
+    while (i < len) {
+      // Skip string literals
+      if (src[i] === '"' || src[i] === "'" || src[i] === '` + '`' + `) {
+        var q = src[i];
+        result += src[i++];
+        while (i < len && src[i] !== q) {
+          if (src[i] === '\\\\') { result += src[i++]; if (i < len) result += src[i++]; continue; }
+          if (q === '` + '`' + ` && src[i] === '$' && src[i+1] === '{') {
+            result += src[i++]; result += src[i++];
+            var bd = 1;
+            while (i < len && bd > 0) {
+              if (src[i] === '{') bd++;
+              else if (src[i] === '}') bd--;
+              if (bd > 0) result += src[i];
+              i++;
+            }
+            result += '}';
+            continue;
+          }
+          result += src[i++];
+        }
+        if (i < len) result += src[i++];
+        continue;
+      }
+      // Skip line comments
+      if (src[i] === '/' && i + 1 < len && src[i+1] === '/') {
+        while (i < len && src[i] !== '\\n') result += src[i++];
+        continue;
+      }
+      // Skip block comments
+      if (src[i] === '/' && i + 1 < len && src[i+1] === '*') {
+        result += src[i++]; result += src[i++];
+        while (i < len - 1 && !(src[i] === '*' && src[i+1] === '/')) result += src[i++];
+        if (i < len) { result += src[i++]; result += src[i++]; }
+        continue;
+      }
+      // Check for colon that could be a type annotation
+      if (src[i] === ':') {
+        // Look back: should be after identifier, ?, or )
+        var bi = i - 1;
+        while (bi >= 0 && (src[bi] === ' ' || src[bi] === '\\t')) bi--;
+        var isAfterIdent = bi >= 0 && /[\\w$?)]/.test(src[bi]);
+        // Look forward past whitespace
+        var fi = i + 1;
+        while (fi < len && (src[fi] === ' ' || src[fi] === '\\t')) fi++;
+        // Check it looks like a type (starts with letter, (, [, {, or typeof)
+        var looksLikeType = fi < len && /[A-Za-z_$(\\[{]/.test(src[fi]);
+        if (isAfterIdent && looksLikeType) {
+          // Check we're NOT inside a destructuring pattern { a: b }
+          var inDestructure = false;
+          var bd2 = 0;
+          for (var k = bi; k >= 0; k--) {
+            if (src[k] === '}') bd2++;
+            else if (src[k] === '{') { bd2--; if (bd2 < 0) { inDestructure = true; break; } }
+            else if (src[k] === ';' || src[k] === '\\n' && bd2 === 0) break;
+            else if (src[k] === '=' && bd2 === 0) break;
+          }
+          if (!inDestructure) {
+            // Skip the type annotation by tracking bracket depth
+            var dp = 0, db = 0, da = 0, dc = 0;
+            var j = fi;
+            while (j < len) {
+              var c = src[j];
+              if (c === '(') dp++;
+              else if (c === ')') { if (dp === 0) break; dp--; }
+              else if (c === '[') db++;
+              else if (c === ']') { if (db === 0) break; db--; }
+              else if (c === '<') da++;
+              else if (c === '>') { if (da > 0) da--; else break; }
+              else if (c === '{') { if (dp === 0 && db === 0 && da === 0) break; dc++; }
+              else if (c === '}') { if (dc === 0) break; dc--; }
+              else if ((c === '=' || c === ',' || c === ';') && dp === 0 && db === 0 && da === 0 && dc === 0) break;
+              j++;
+            }
+            // Skip colon and type, keep the terminator
+            i = j;
+            continue;
+          }
+        }
+      }
+      result += src[i++];
+    }
+    return result;
   }
 
   function argsToString(args) {
