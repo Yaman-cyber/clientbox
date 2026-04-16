@@ -57,11 +57,12 @@ export class PythonRunner extends BaseRunner {
     const id = this.generateId();
 
     try {
-      const worker = await this.ensureWorker();
-      this.setStatus('running');
-
       const result = await this.withTimeout(
-        this.executeInWorker(worker, id, options),
+        (async () => {
+          const worker = await this.ensureWorker();
+          this.setStatus('running');
+          return this.executeInWorker(worker, id, options);
+        })(),
         timeout
       );
       const duration = Math.round(performance.now() - start);

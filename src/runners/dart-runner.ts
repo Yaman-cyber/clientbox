@@ -284,11 +284,12 @@ export class DartRunner extends BaseRunner {
     const id = this.generateId();
 
     try {
-      const iframe = await this.ensureIframe();
-      this.setStatus('running');
-
       const result = await this.withTimeout(
-        this.executeInIframe(iframe, id, options),
+        (async () => {
+          const iframe = await this.ensureIframe();
+          this.setStatus('running');
+          return this.executeInIframe(iframe, id, options);
+        })(),
         timeout
       );
       const duration = Math.round(performance.now() - start);

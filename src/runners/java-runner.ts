@@ -29,10 +29,24 @@ window.addEventListener('message', function(e) {
 });
 
 async function initCheerpJ() {
+  var timedOut = false;
+  var initTimer = setTimeout(function() {
+    timedOut = true;
+    cjReady = true;
+    parent.postMessage({ type: 'clientbox-ready', error: 'timeout' }, '*');
+    for (var i = 0; i < pendingMessages.length; i++) {
+      handleRun(pendingMessages[i]);
+    }
+    pendingMessages = [];
+  }, 8000);
+
   try {
+    if (typeof cheerpjInit !== 'function') throw new Error('CheerpJ not available');
     await cheerpjInit({
       status: 'none'
     });
+    if (timedOut) return;
+    clearTimeout(initTimer);
     cjReady = true;
     parent.postMessage({ type: 'clientbox-ready' }, '*');
     for (var i = 0; i < pendingMessages.length; i++) {
@@ -40,7 +54,14 @@ async function initCheerpJ() {
     }
     pendingMessages = [];
   } catch(e) {
+    if (timedOut) return;
+    clearTimeout(initTimer);
+    cjReady = true;
     parent.postMessage({ type: 'clientbox-ready', error: e.message || String(e) }, '*');
+    for (var i = 0; i < pendingMessages.length; i++) {
+      handleRun(pendingMessages[i]);
+    }
+    pendingMessages = [];
   }
 }
 
@@ -410,11 +431,12 @@ export class JavaRunner extends BaseRunner {
     const id = this.generateId();
 
     try {
-      const iframe = await this.ensureIframe();
-      this.setStatus('running');
-
       const result = await this.withTimeout(
-        this.executeInIframe(iframe, id, options),
+        (async () => {
+          const iframe = await this.ensureIframe();
+          this.setStatus('running');
+          return this.executeInIframe(iframe, id, options);
+        })(),
         timeout
       );
       const duration = Math.round(performance.now() - start);

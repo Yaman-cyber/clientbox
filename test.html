@@ -83,6 +83,11 @@
     .modal-btns .primary { background:var(--accent); border-color:var(--accent); color:#fff; }
 
     @keyframes spin { to { transform: rotate(360deg); } }
+
+    .loading-overlay { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 1rem; padding: 3rem 1rem; height: 100%; }
+    .loading-spinner { width: 28px; height: 28px; border: 3px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin .7s linear infinite; }
+    .loading-msg { font-size: .82rem; color: var(--text-dim); text-align: center; }
+    .loading-sub { font-size: .68rem; color: var(--text-dimmer); margin-top: -.4rem; }
   </style>
 </head>
 <body>
@@ -237,6 +242,8 @@ var fileContents = {};
 var entryPoints = {};
 var renamingFile = "";
 var box = null;
+var isRunning = false;
+
 
 for (var lang in EXAMPLES) {
   fileContents[lang] = {};
@@ -506,15 +513,23 @@ function buildInlinedPreview(files, ep) {
 
 function esc(s) { return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
 
+function showLoading(msg, sub) {
+  var conOut = document.getElementById("consoleOutput");
+  conOut.innerHTML = '<div class="loading-overlay"><div class="loading-spinner"></div>' +
+    '<div class="loading-msg">' + esc(msg) + '</div>' +
+    (sub ? '<div class="loading-sub">' + esc(sub) + '</div>' : '') + '</div>';
+}
+
 async function runCode() {
-  if (!box) return;
+  if (!box || isRunning) return;
+  isRunning = true;
   saveEditorToState();
   var btn = document.getElementById("runBtn");
   var conOut = document.getElementById("consoleOutput");
   var frame = document.getElementById("previewFrame");
 
   btn.disabled = true;
-  conOut.innerHTML = '<span class="meta">Executing...</span>';
+  showLoading("Initializing runtime...", "This may take a moment for the first run");
 
   try {
     var files = {};
@@ -538,6 +553,7 @@ async function runCode() {
     conOut.innerHTML = '<span class="err">' + esc(e.message || String(e)) + "</span>";
   }
 
+  isRunning = false;
   btn.disabled = false;
 }
 
@@ -641,6 +657,11 @@ require(["vs/editor/editor.main"], function() {
       onStatusChange: function(e) {
         document.getElementById("statusText").textContent =
           "[" + e.language + "] " + e.status + (e.message ? " \u2014 " + e.message : "");
+        if (isRunning && e.status === "loading") {
+          showLoading(e.message || "Loading runtime...", "This may take a moment for the first run");
+        } else if (isRunning && e.status === "running") {
+          document.getElementById("consoleOutput").innerHTML = '<div class="loading-overlay"><div class="loading-spinner"></div><div class="loading-msg">Executing...</div></div>';
+        }
       }
     });
     switchLang("node");
