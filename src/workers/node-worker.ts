@@ -38,6 +38,81 @@ self.onmessage = function(e) {
 
   var moduleCache = {};
 
+  function esmToCjs(code) {
+    if (code.indexOf('import ') === -1 && code.indexOf('export ') === -1) return code;
+    var t = code;
+
+    // import { a, b } from './mod'  or  import { a as x } from './mod'
+    t = t.replace(
+      /import\\s+\\{([^}]+)\\}\\s+from\\s+['\"]([^'\"]+)['\"];?/g,
+      function(_, named, spec) {
+        var tmp = '__imp_' + Math.random().toString(36).slice(2, 7);
+        var req = 'var ' + tmp + ' = require("' + spec + '");';
+        var names = named.split(',').map(function(n) { return n.trim(); }).filter(function(n) { return n; });
+        var decls = names.map(function(n) {
+          var parts = n.split(/\\s+as\\s+/);
+          return 'var ' + (parts[1] || parts[0]).trim() + ' = ' + tmp + '["' + parts[0].trim() + '"];';
+        }).join('\\n');
+        return req + '\\n' + decls;
+      }
+    );
+
+    // import * as name from './mod'
+    t = t.replace(
+      /import\\s+\\*\\s+as\\s+(\\w+)\\s+from\\s+['\"]([^'\"]+)['\"];?/g,
+      'var $1 = require("$2");'
+    );
+
+    // import defaultName from './mod'
+    t = t.replace(
+      /import\\s+([\\w$]+)\\s+from\\s+['\"]([^'\"]+)['\"];?/g,
+      function(_, def, spec) {
+        var tmp = '__imp_' + Math.random().toString(36).slice(2, 7);
+        return 'var ' + tmp + ' = require("' + spec + '"); var ' + def + ' = ' + tmp + '.__esModule ? ' + tmp + '.default : ' + tmp + ';';
+      }
+    );
+
+    // import './mod' (side-effect)
+    t = t.replace(
+      /import\\s+['\"]([^'\"]+)['\"];?/g,
+      'require("$1");'
+    );
+
+    // export default expr
+    t = t.replace(
+      /export\\s+default\\s+/g,
+      'module.exports.__esModule = true; module.exports.default = '
+    );
+
+    // export { name1, name2 }  and  export { name1 as alias }
+    t = t.replace(
+      /export\\s+\\{([^}]+)\\};?/g,
+      function(_, names) {
+        return names.split(',').map(function(n) {
+          var parts = n.trim().split(/\\s+as\\s+/);
+          var local = parts[0].trim();
+          var exported = (parts[1] || parts[0]).trim();
+          return 'exports["' + exported + '"] = ' + local + ';';
+        }).join('\\n');
+      }
+    );
+
+    // export const/let/var/function/class name -> strip export, collect name
+    var exportedNames = [];
+    t = t.replace(
+      /export\\s+(const|let|var|function|class)\\s+(\\w+)/g,
+      function(_, keyword, name) {
+        exportedNames.push(name);
+        return keyword + ' ' + name;
+      }
+    );
+    for (var ei = 0; ei < exportedNames.length; ei++) {
+      t += '\\nexports["' + exportedNames[ei] + '"] = ' + exportedNames[ei] + ';';
+    }
+
+    return t;
+  }
+
   function createRequire(currentPath) {
     return function require(request) {
       var resolvedPath = resolveModule(request, currentPath);
@@ -50,6 +125,7 @@ self.onmessage = function(e) {
       moduleCache[resolvedPath] = moduleObj;
       var code = files[resolvedPath];
       if (isTS(resolvedPath)) code = stripTS(code);
+      code = esmToCjs(code);
 
       var wrappedFn = new Function(
         'module', 'exports', 'require', '__filename', '__dirname', 'console',
@@ -185,39 +261,7 @@ self.onmessage = function(e) {
       throw new Error("Entry point not found: " + entryPoint);
     }
     if (isTS(entryPoint)) entryCode = stripTS(entryCode);
-
-    var isESM = entryCode.includes('import ') || entryCode.includes('export ');
-
-    if (isESM) {
-      var transformed = entryCode;
-      transformed = transformed.replace(
-        /import\\s+(?:\\{([^}]+)\\}|([\\w$]+))\\s+from\\s+['"]([\\.][^'"]+)['"]/g,
-        function(_, named, def, specifier) {
-          var varName = def || '__imp_' + Math.random().toString(36).slice(2, 6);
-          var req = 'var ' + varName + ' = require("' + specifier + '");';
-          if (named) {
-            var names = named.split(',').map(function(n) { return n.trim(); });
-            var destructured = names.map(function(n) {
-              var parts = n.split(/\\s+as\\s+/);
-              return 'var ' + (parts[1] || parts[0]).trim() + ' = ' + varName + '["' + parts[0].trim() + '"];';
-            }).join('\\n');
-            return req + '\\n' + destructured;
-          }
-          return req;
-        }
-      );
-
-      transformed = transformed.replace(
-        /export\\s+default\\s+/g, 'module.exports = '
-      );
-      transformed = transformed.replace(
-        /export\\s+(?:const|let|var|function|class)\\s+(\\w+)/g,
-        function(match, name) {
-          return match.replace(/^export\\s+/, '') + '; exports.' + name + ' = ' + name;
-        }
-      );
-      entryCode = transformed;
-    }
+    entryCode = esmToCjs(entryCode);
 
     var wrapFn = new Function(
       'module', 'exports', 'require', '__filename', '__dirname', 'console',

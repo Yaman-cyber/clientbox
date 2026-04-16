@@ -231,15 +231,15 @@ var RUNNER_ALIAS = { typescript: "node" };
 var EXAMPLES = {
   node: {
     files: {
-      "/index.js": "const { greet } = require('./utils');\n\nconsole.log(greet('World'));\nconsole.log('2 + 2 =', 2 + 2);\n\nconst items = [1, 2, 3, 4, 5];\nconsole.log('Sum:', items.reduce((a, b) => a + b, 0));",
-      "/utils.js": "module.exports = {\n  greet: (name) => 'Hello, ' + name + '!',\n};"
+      "/index.js": "import { greet, farewell } from './utils.js';\n\nconsole.log(greet('World'));\nconsole.log(farewell('World'));\n\nconst items = [1, 2, 3, 4, 5];\nconsole.log('Sum:', items.reduce((a, b) => a + b, 0));",
+      "/utils.js": "export function greet(name) {\n  return 'Hello, ' + name + '!';\n}\n\nexport function farewell(name) {\n  return 'Goodbye, ' + name + '!';\n}"
     },
     entryPoint: "/index.js"
   },
   typescript: {
     files: {
-      "/index.ts": "const { greet, sum } = require('./helpers');\n\ninterface User {\n  name: string;\n  age: number;\n}\n\nconst users: User[] = [\n  { name: 'Alice', age: 30 },\n  { name: 'Bob', age: 25 },\n  { name: 'Charlie', age: 35 },\n];\n\nusers.forEach((user: User) => {\n  console.log(greet(user.name));\n});\n\nconsole.log('\\n2 + 3 =', sum(2, 3));\nconsole.log('10 + 20 =', sum(10, 20));",
-      "/helpers.ts": "function greet(name: string): string {\n  return 'Hello, ' + name + '!';\n}\n\nfunction sum(a: number, b: number): number {\n  return a + b;\n}\n\nmodule.exports = { greet, sum };"
+      "/index.ts": "import { greet, sum } from './helpers';\n\ninterface User {\n  name: string;\n  age: number;\n}\n\nconst users: User[] = [\n  { name: 'Alice', age: 30 },\n  { name: 'Bob', age: 25 },\n  { name: 'Charlie', age: 35 },\n];\n\nusers.forEach((user: User) => {\n  console.log(greet(user.name));\n});\n\nconsole.log('\\n2 + 3 =', sum(2, 3));\nconsole.log('10 + 20 =', sum(10, 20));",
+      "/helpers.ts": "export function greet(name: string): string {\n  return 'Hello, ' + name + '!';\n}\n\nexport function sum(a: number, b: number): number {\n  return a + b;\n}"
     },
     entryPoint: "/index.ts"
   },
