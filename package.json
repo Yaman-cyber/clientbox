@@ -1,0 +1,81 @@
+{
+  "name": "clientbox",
+  "version": "0.1.0",
+  "description": "Pure client-side, in-browser code execution engine for JavaScript, TypeScript, Python, HTML/CSS/JS, C#, Java, PHP, Dart, and Go",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "code-execution",
+    "sandbox",
+    "browser",
+    "javascript",
+    "typescript",
+    "python",
+    "csharp",
+    "java",
+    "php",
+    "dart",
+    "go",
+    "golang",
+    "webassembly",
+    "pyodide",
+    "cheerpj",
+    "iframe",
+    "web-worker",
+    "client-side",
+    "in-browser",
+    "code-runner",
+    "playground",
+    "online-compiler",
+    "code-sandbox",
+    "browser-ide",
+    "run-code",
+    "execute-code",
+    "repl",
+    "interpreter",
+    "no-backend",
+    "serverless",
+    "wasm",
+    "virtual-filesystem",
+    "multi-language",
+    "editor"
+  ],
+  "author": "Yaman-cyber",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Yaman-cyber/clientbox.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Yaman-cyber/clientbox/issues"
+  },
+  "homepage": "https://yaman-cyber.github.io/clientbox/",
+  "license": "MIT",
+  "devDependencies": {
+    "tsup": "^8.0.0",
+    "typescript": "^5.4.0"
+  },
+  "sideEffects": false
+}

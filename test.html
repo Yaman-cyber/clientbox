@@ -1,0 +1,657 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>clientbox Playground</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg: #0c0c12;
+      --bg-1: #101018;
+      --bg-2: #16161e;
+      --border: #1e1e2a;
+      --text: #e0e0e6;
+      --text-dim: #666;
+      --text-dimmer: #444;
+      --accent: #2563eb;
+      --accent-hover: #1d4ed8;
+      --green: #4ade80;
+      --red: #f87171;
+    }
+
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: var(--bg); color: var(--text); height: 100vh; overflow: hidden; display: flex; flex-direction: column; }
+
+    .header { display: flex; align-items: center; justify-content: space-between; padding: .6rem 1.2rem; border-bottom: 1px solid var(--border); background: var(--bg-1); flex-shrink: 0; }
+    .header h1 { font-size: 1rem; font-weight: 700; }
+    .header h1 span { color: var(--accent); }
+    .header-right { display: flex; align-items: center; gap: .8rem; }
+    .status-bar { font-size: .7rem; color: var(--text-dim); max-width: 350px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+    .run-btn { padding: .35rem 1.1rem; border-radius: 6px; border: none; background: var(--accent); color: #fff; font-size: .75rem; font-weight: 600; cursor: pointer; display: flex; align-items: center; gap: .35rem; transition: background .12s; }
+    .run-btn:hover { background: var(--accent-hover); }
+    .run-btn:disabled { opacity: .35; cursor: not-allowed; }
+    .run-btn svg { width: 11px; height: 11px; }
+    .run-btn .shortcut { opacity: .5; font-size: .65rem; margin-left: .3rem; }
+
+    .lang-bar { display: flex; gap: 0; border-bottom: 1px solid var(--border); background: var(--bg-1); flex-shrink: 0; padding-left: .5rem; }
+    .lang-tab { padding: .55rem 1.2rem; font-size: .78rem; color: var(--text-dim); cursor: pointer; border-bottom: 2px solid transparent; transition: all .12s; font-weight: 500; }
+    .lang-tab:hover { color: #aaa; }
+    .lang-tab.active { color: var(--text); border-bottom-color: var(--accent); }
+
+    .main { display: flex; flex: 1; overflow: hidden; }
+    .editor-pane { display: flex; flex-direction: column; width: 50%; border-right: 1px solid var(--border); overflow: hidden; }
+    .output-pane { display: flex; flex-direction: column; width: 50%; overflow: hidden; }
+    @media (max-width: 900px) { .main { flex-direction: column; } .editor-pane, .output-pane { width: 100%; height: 50%; } }
+
+    .file-bar { display: flex; align-items: stretch; background: var(--bg-1); border-bottom: 1px solid var(--border); min-height: 32px; overflow-x: auto; flex-shrink: 0; }
+    .file-tab { display: flex; align-items: center; gap: .3rem; padding: 0 .8rem; font-size: .72rem; font-family: 'JetBrains Mono', 'Fira Code', monospace; color: var(--text-dim); cursor: pointer; border-right: 1px solid #12121a; white-space: nowrap; transition: all .1s; position: relative; }
+    .file-tab:hover { color: #aaa; background: #12121c; }
+    .file-tab.active { color: var(--text); background: var(--bg); }
+    .file-tab.active::after { content:''; position:absolute; bottom:0; left:0; right:0; height:1px; background: var(--bg); }
+    .entry-badge { color: var(--accent); font-size: .55rem; }
+    .del-btn { display: none; width: 16px; height: 16px; line-height: 16px; text-align: center; border-radius: 3px; font-size: .6rem; color: #555; flex-shrink: 0; }
+    .file-tab:hover .del-btn { display: block; }
+    .del-btn:hover { background: rgba(248,113,113,.15); color: var(--red); }
+    .add-btn { display: flex; align-items: center; padding: 0 .6rem; font-size: .85rem; color: #333; cursor: pointer; }
+    .add-btn:hover { color: #888; }
+
+    .editor-container { flex: 1; overflow: hidden; }
+
+    .output-header { display: flex; align-items: center; justify-content: space-between; background: var(--bg-1); border-bottom: 1px solid var(--border); min-height: 32px; padding: 0 .5rem; flex-shrink: 0; }
+    .output-tabs { display: flex; gap: 0; }
+    .out-tab { padding: .4rem .8rem; font-size: .68rem; text-transform: uppercase; letter-spacing: .08em; color: var(--text-dim); cursor: pointer; border-bottom: 2px solid transparent; font-weight: 600; transition: all .1s; }
+    .out-tab:hover { color: #888; }
+    .out-tab.active { color: var(--text); border-bottom-color: var(--accent); }
+
+    .output-body { flex: 1; overflow: auto; position: relative; }
+    .console-output { padding: .8rem 1rem; font-family: 'JetBrains Mono', 'Fira Code', monospace; font-size: .78rem; white-space: pre-wrap; line-height: 1.6; height: 100%; overflow: auto; }
+    .console-output .out { color: var(--green); }
+    .console-output .err { color: var(--red); }
+    .console-output .meta { color: var(--text-dimmer); }
+    .preview-frame { width: 100%; height: 100%; border: none; background: #fff; display: none; }
+
+    .modal-bg { display:none; position:fixed; inset:0; background:rgba(0,0,0,.55); z-index:200; align-items:center; justify-content:center; }
+    .modal-bg.open { display:flex; }
+    .modal { background: var(--bg-2); border: 1px solid var(--border); border-radius: 10px; padding: 1.3rem; min-width: 320px; }
+    .modal h3 { font-size: .9rem; margin-bottom: .8rem; font-weight: 600; }
+    .modal input { width:100%; padding:.5rem .7rem; background:var(--bg); border:1px solid var(--border); border-radius:6px; color:var(--text); font-family:'JetBrains Mono',monospace; font-size:.82rem; outline:none; margin-bottom:.8rem; }
+    .modal input:focus { border-color:var(--accent); }
+    .modal-btns { display:flex; gap:.4rem; justify-content:flex-end; }
+    .modal-btns button { padding:.4rem 1rem; border-radius:6px; border:1px solid var(--border); background:transparent; color:#aaa; font-size:.78rem; cursor:pointer; }
+    .modal-btns .primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+
+<div class="header">
+  <h1><span>client</span>box</h1>
+  <div class="header-right">
+    <span class="status-bar" id="statusText"></span>
+    <button class="run-btn" id="runBtn">
+      <svg viewBox="0 0 24 24" fill="currentColor"><polygon points="5,3 19,12 5,21"/></svg>
+      Run<span class="shortcut">&#8984;&#9166;</span>
+    </button>
+  </div>
+</div>
+
+<div class="lang-bar" id="langTabs"></div>
+
+<div class="main">
+  <div class="editor-pane">
+    <div class="file-bar" id="fileBar"></div>
+    <div class="editor-container" id="editorContainer"></div>
+  </div>
+  <div class="output-pane">
+    <div class="output-header">
+      <div class="output-tabs" id="outputTabs"></div>
+    </div>
+    <div class="output-body" id="outputBody">
+      <div class="console-output" id="consoleOutput"><span class="meta">Press Run to execute...</span></div>
+      <iframe class="preview-frame" id="previewFrame"></iframe>
+    </div>
+  </div>
+</div>
+
+<div class="modal-bg" id="newFileModal">
+  <div class="modal">
+    <h3>New file</h3>
+    <input id="newFileName" placeholder="/filename.js" autocomplete="off" />
+    <div class="modal-btns">
+      <button id="newFileCancelBtn">Cancel</button>
+      <button class="primary" id="newFileCreateBtn">Create</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-bg" id="renameModal">
+  <div class="modal">
+    <h3>Rename file</h3>
+    <input id="renameInput" autocomplete="off" />
+    <div class="modal-btns">
+      <button id="renameCancelBtn">Cancel</button>
+      <button class="primary" id="renameConfirmBtn">Rename</button>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min/vs/loader.js"></script>
+
+<script>
+(function() {
+"use strict";
+
+var CLOSE_SCRIPT = "<" + "/script>";
+
+var LANG_MAP = {
+  node: "javascript",
+  typescript: { ".ts": "typescript", ".tsx": "typescript", ".js": "javascript" },
+  python: "python",
+  web: { ".html": "html", ".css": "css", ".js": "javascript", ".json": "json", ".svg": "xml" },
+  csharp: "csharp",
+  java: "java",
+  php: "php",
+  dart: "dart",
+  go: "go"
+};
+
+var RUNNER_ALIAS = { typescript: "node" };
+
+var EXAMPLES = {
+  node: {
+    files: {
+      "/index.js": "const { greet } = require('./utils');\n\nconsole.log(greet('World'));\nconsole.log('2 + 2 =', 2 + 2);\n\nconst items = [1, 2, 3, 4, 5];\nconsole.log('Sum:', items.reduce((a, b) => a + b, 0));",
+      "/utils.js": "module.exports = {\n  greet: (name) => 'Hello, ' + name + '!',\n};"
+    },
+    entryPoint: "/index.js"
+  },
+  typescript: {
+    files: {
+      "/index.ts": "const { greet, sum } = require('./helpers');\n\ninterface User {\n  name: string;\n  age: number;\n}\n\nconst users: User[] = [\n  { name: 'Alice', age: 30 },\n  { name: 'Bob', age: 25 },\n  { name: 'Charlie', age: 35 },\n];\n\nusers.forEach((user: User) => {\n  console.log(greet(user.name));\n});\n\nconsole.log('\\n2 + 3 =', sum(2, 3));\nconsole.log('10 + 20 =', sum(10, 20));",
+      "/helpers.ts": "function greet(name: string): string {\n  return 'Hello, ' + name + '!';\n}\n\nfunction sum(a: number, b: number): number {\n  return a + b;\n}\n\nmodule.exports = { greet, sum };"
+    },
+    entryPoint: "/index.ts"
+  },
+  python: {
+    files: {
+      "/main.py": "import utils\n\nfor i in range(5):\n    print(f\"{i} squared is {utils.square(i)}\")\n\nprint(\"\\nFibonacci:\")\na, b = 0, 1\nfor _ in range(10):\n    print(a, end=\" \")\n    a, b = b, a + b\nprint()",
+      "/utils.py": "def square(n):\n    return n * n"
+    },
+    entryPoint: "/main.py"
+  },
+  web: {
+    files: {
+      "/index.html": "<!DOCTYPE html>\n<html>\n<head>\n  <link rel=\"stylesheet\" href=\"style.css\">\n</head>\n<body>\n  <h1>Hello from clientbox!</h1>\n  <p id=\"msg\"></p>\n  <ul id=\"list\"></ul>\n  <script src=\"app.js\">" + CLOSE_SCRIPT + "\n</body>\n</html>",
+      "/style.css": "body {\n  font-family: system-ui, sans-serif;\n  padding: 2rem;\n  background: linear-gradient(135deg, #0f0c29, #302b63, #24243e);\n  color: #e0e0e0;\n  min-height: 100vh;\n}\n\nh1 {\n  color: #4fc3f7;\n  margin-bottom: .5rem;\n}\n\nul {\n  list-style: none;\n  padding: 0;\n  margin-top: 1rem;\n}\n\nli {\n  padding: .5rem 1rem;\n  background: rgba(255,255,255,.07);\n  border-radius: 8px;\n  margin-bottom: .4rem;\n  font-size: .9rem;\n}",
+      "/app.js": "document.getElementById('msg').textContent =\n  'Rendered at ' + new Date().toLocaleTimeString();\n\nvar list = document.getElementById('list');\n['JavaScript', 'Python', 'HTML/CSS', 'C#', 'Java', 'PHP', 'Dart'].forEach(function(lang) {\n  var li = document.createElement('li');\n  li.textContent = lang + ' \\u2014 supported';\n  list.appendChild(li);\n});\n\nconsole.log('Page loaded');"
+    },
+    entryPoint: "/index.html"
+  },
+  csharp: {
+    files: {
+      "/Program.cs": "using System;\n\nclass Program\n{\n    static void Main(string[] args)\n    {\n        Console.WriteLine(\"Hello from C#!\");\n\n        for (int i = 1; i <= 5; i++)\n        {\n            Console.WriteLine($\"{i}! = {MathHelper.Factorial(i)}\");\n        }\n\n        Console.WriteLine($\"Fibonacci(8) = {MathHelper.Fibonacci(8)}\");\n    }\n}",
+      "/MathHelper.cs": "using System;\n\nclass MathHelper\n{\n    public static int Factorial(int n)\n    {\n        if (n <= 1) return 1;\n        return n * Factorial(n - 1);\n    }\n\n    public static int Fibonacci(int n)\n    {\n        if (n <= 1) return n;\n        return Fibonacci(n - 1) + Fibonacci(n - 2);\n    }\n}"
+    },
+    entryPoint: "/Program.cs"
+  },
+  java: {
+    files: {
+      "/Main.java": "public class Main {\n    public static void main(String[] args) {\n        System.out.println(\"Hello from Java!\");\n\n        for (int i = 1; i <= 5; i++) {\n            System.out.println(i + \"! = \" + MathUtils.factorial(i));\n        }\n\n        System.out.println(\"Fibonacci(8) = \" + MathUtils.fibonacci(8));\n    }\n}",
+      "/MathUtils.java": "public class MathUtils {\n    public static int factorial(int n) {\n        if (n <= 1) return 1;\n        return n * factorial(n - 1);\n    }\n\n    public static int fibonacci(int n) {\n        if (n <= 1) return n;\n        return fibonacci(n - 1) + fibonacci(n - 2);\n    }\n}"
+    },
+    entryPoint: "/Main.java"
+  },
+  php: {
+    files: {
+      "/index.php": "<?php\nrequire_once 'helpers.php';\n\necho \"Hello from PHP!\\n\";\n\nfor ($i = 1; $i <= 5; $i++) {\n    echo \"Factorial of $i = \" . factorial($i) . \"\\n\";\n}\n\necho \"Fibonacci(8) = \" . fibonacci(8) . \"\\n\";\n\n$fruits = [\"apple\", \"banana\", \"cherry\"];\nforeach ($fruits as $index => $fruit) {\n    echo ($index + 1) . \". \" . ucfirst($fruit) . \"\\n\";\n}\n?>",
+      "/helpers.php": "<?php\nfunction factorial($n) {\n    if ($n <= 1) return 1;\n    return $n * factorial($n - 1);\n}\n\nfunction fibonacci($n) {\n    if ($n <= 1) return $n;\n    return fibonacci($n - 1) + fibonacci($n - 2);\n}\n?>"
+    },
+    entryPoint: "/index.php"
+  },
+  go: {
+    files: {
+      "/main.go": "package main\n\nimport (\n\t\"fmt\"\n)\n\nfunc main() {\n\tfmt.Println(\"Hello from Go!\")\n\n\tfor i := 1; i <= 5; i++ {\n\t\tfmt.Printf(\"%d! = %d\\n\", i, factorial(i))\n\t}\n\n\tfmt.Printf(\"Fibonacci(8) = %d\\n\", fibonacci(8))\n\n\tfruits := []string{\"apple\", \"banana\", \"cherry\"}\n\tfor i, fruit := range fruits {\n\t\tfmt.Printf(\"%d. %s\\n\", i+1, fruit)\n\t}\n}",
+      "/mathutils.go": "package main\n\nfunc factorial(n int) int {\n\tif n <= 1 {\n\t\treturn 1\n\t}\n\treturn n * factorial(n-1)\n}\n\nfunc fibonacci(n int) int {\n\tif n <= 1 {\n\t\treturn n\n\t}\n\treturn fibonacci(n-1) + fibonacci(n-2)\n}"
+    },
+    entryPoint: "/main.go"
+  },
+  dart: {
+    files: {
+      "/main.dart": "void main() {\n  print('Hello from Dart!');\n\n  for (int i = 1; i <= 5; i++) {\n    print('$i! = ${factorial(i)}');\n  }\n\n  print('Fibonacci(8) = ${fibonacci(8)}');\n\n  var fruits = ['apple', 'banana', 'cherry'];\n  for (var i = 0; i < fruits.length; i++) {\n    print('${i + 1}. ${fruits[i][0].toUpperCase()}${fruits[i].substring(1)}');\n  }\n}",
+      "/mathutils.dart": "int factorial(int n) {\n  if (n <= 1) return 1;\n  return n * factorial(n - 1);\n}\n\nint fibonacci(int n) {\n  if (n <= 1) return n;\n  return fibonacci(n - 1) + fibonacci(n - 2);\n}"
+    },
+    entryPoint: "/main.dart"
+  }
+};
+
+var editor = null;
+var monacoReady = false;
+var modelCache = {};
+var currentLang = "node";
+var currentFile = "";
+var activeOutputTab = "console";
+var fileContents = {};
+var entryPoints = {};
+var renamingFile = "";
+var box = null;
+
+for (var lang in EXAMPLES) {
+  fileContents[lang] = {};
+  for (var f in EXAMPLES[lang].files) {
+    fileContents[lang][f] = EXAMPLES[lang].files[f];
+  }
+  entryPoints[lang] = EXAMPLES[lang].entryPoint;
+}
+
+function monacoLangFor(lang, filePath) {
+  var map = LANG_MAP[lang];
+  if (typeof map === "string") return map;
+  if (typeof map === "object") {
+    var ext = filePath.slice(filePath.lastIndexOf("."));
+    return map[ext] || "plaintext";
+  }
+  return "plaintext";
+}
+
+function getOrCreateModel(lang, filePath, content) {
+  var key = lang + "::" + filePath;
+  if (modelCache[key]) {
+    if (modelCache[key].getValue() !== content) modelCache[key].setValue(content);
+    return modelCache[key];
+  }
+  var mLang = monacoLangFor(lang, filePath);
+  var model = monaco.editor.createModel(content, mLang);
+  modelCache[key] = model;
+  return model;
+}
+
+function deleteModel(lang, filePath) {
+  var key = lang + "::" + filePath;
+  if (modelCache[key]) { modelCache[key].dispose(); delete modelCache[key]; }
+}
+
+function renameModel(lang, oldPath, newPath) {
+  var oldKey = lang + "::" + oldPath;
+  var newKey = lang + "::" + newPath;
+  if (modelCache[oldKey]) {
+    var content = modelCache[oldKey].getValue();
+    modelCache[oldKey].dispose();
+    delete modelCache[oldKey];
+    modelCache[newKey] = monaco.editor.createModel(content, monacoLangFor(lang, newPath));
+  }
+}
+
+function setEditorFile(lang, filePath, content) {
+  if (!editor) return;
+  var model = getOrCreateModel(lang, filePath, content);
+  editor.setModel(model);
+}
+
+function saveEditorToState() {
+  if (!editor || !currentFile || !fileContents[currentLang]) return;
+  var model = editor.getModel();
+  if (model) fileContents[currentLang][currentFile] = model.getValue();
+}
+
+function renderLangTabs() {
+  var c = document.getElementById("langTabs");
+  c.innerHTML = "";
+  Object.keys(EXAMPLES).forEach(function(lang) {
+    var t = document.createElement("div");
+    t.className = "lang-tab" + (lang === currentLang ? " active" : "");
+    t.textContent = lang;
+    t.addEventListener("click", function() { switchLang(lang); });
+    c.appendChild(t);
+  });
+}
+
+function renderFileTabs() {
+  var c = document.getElementById("fileBar");
+  c.innerHTML = "";
+  var files = fileContents[currentLang];
+  var paths = Object.keys(files);
+
+  paths.forEach(function(path) {
+    var tab = document.createElement("div");
+    tab.className = "file-tab" + (path === currentFile ? " active" : "");
+
+    var name = document.createElement("span");
+    name.textContent = path;
+    name.addEventListener("dblclick", function(e) { e.stopPropagation(); openRenameModal(path); });
+    tab.appendChild(name);
+
+    if (path === entryPoints[currentLang]) {
+      var b = document.createElement("span");
+      b.className = "entry-badge";
+      b.textContent = " \u25B6";
+      b.title = "Entry point (right-click to change)";
+      tab.appendChild(b);
+    }
+
+    if (paths.length > 1) {
+      var d = document.createElement("span");
+      d.className = "del-btn";
+      d.textContent = "\u2715";
+      d.title = "Delete";
+      d.addEventListener("click", function(e) { e.stopPropagation(); deleteFile(path); });
+      tab.appendChild(d);
+    }
+
+    tab.addEventListener("click", function() { switchFile(path); });
+    tab.addEventListener("contextmenu", function(e) { e.preventDefault(); setEntryPoint(path); });
+    c.appendChild(tab);
+  });
+
+  var add = document.createElement("div");
+  add.className = "add-btn";
+  add.textContent = "+";
+  add.title = "New file";
+  add.addEventListener("click", openNewFileModal);
+  c.appendChild(add);
+}
+
+function renderOutputTabs() {
+  var c = document.getElementById("outputTabs");
+  c.innerHTML = "";
+  var tabs = currentLang === "web"
+    ? [["preview", "Preview"], ["console", "Console"]]
+    : [["console", "Console"]];
+
+  if (currentLang === "web" && activeOutputTab !== "preview" && activeOutputTab !== "console") {
+    activeOutputTab = "preview";
+  } else if (currentLang !== "web") {
+    activeOutputTab = "console";
+  }
+
+  tabs.forEach(function(pair) {
+    var t = document.createElement("div");
+    t.className = "out-tab" + (pair[0] === activeOutputTab ? " active" : "");
+    t.textContent = pair[1];
+    t.addEventListener("click", function() { activeOutputTab = pair[0]; renderOutputTabs(); showOutputTab(); });
+    c.appendChild(t);
+  });
+  showOutputTab();
+}
+
+function showOutputTab() {
+  var con = document.getElementById("consoleOutput");
+  var frame = document.getElementById("previewFrame");
+  if (activeOutputTab === "preview") {
+    con.style.display = "none";
+    frame.style.display = "block";
+  } else {
+    con.style.display = "block";
+    frame.style.display = "none";
+  }
+}
+
+function switchLang(lang) {
+  saveEditorToState();
+  currentLang = lang;
+  currentFile = entryPoints[lang];
+  renderLangTabs();
+  renderFileTabs();
+  renderOutputTabs();
+  if (monacoReady) setEditorFile(lang, currentFile, fileContents[lang][currentFile] || "");
+  document.getElementById("consoleOutput").innerHTML = '<span class="meta">Press Run to execute...</span>';
+  document.getElementById("previewFrame").srcdoc = "";
+  document.getElementById("statusText").textContent = "";
+}
+
+function switchFile(path) {
+  saveEditorToState();
+  currentFile = path;
+  renderFileTabs();
+  if (monacoReady) setEditorFile(currentLang, path, fileContents[currentLang][path] || "");
+}
+
+function deleteFile(path) {
+  if (!confirm("Delete " + path + "?")) return;
+  saveEditorToState();
+  deleteModel(currentLang, path);
+  delete fileContents[currentLang][path];
+  var remaining = Object.keys(fileContents[currentLang]);
+  if (entryPoints[currentLang] === path) entryPoints[currentLang] = remaining[0];
+  if (currentFile === path) currentFile = remaining[0];
+  renderFileTabs();
+  if (monacoReady) setEditorFile(currentLang, currentFile, fileContents[currentLang][currentFile] || "");
+}
+
+function setEntryPoint(path) {
+  entryPoints[currentLang] = path;
+  renderFileTabs();
+}
+
+function openNewFileModal() {
+  var ext = { node: ".js", typescript: ".ts", python: ".py", web: ".html", csharp: ".cs", java: ".java", php: ".php", go: ".go", dart: ".dart" };
+  var inp = document.getElementById("newFileName");
+  inp.value = "/newfile" + (ext[currentLang] || ".txt");
+  document.getElementById("newFileModal").classList.add("open");
+  setTimeout(function() { inp.focus(); inp.setSelectionRange(1, inp.value.lastIndexOf(".")); }, 50);
+}
+
+function closeNewFileModal() { document.getElementById("newFileModal").classList.remove("open"); }
+
+function confirmNewFile() {
+  var name = document.getElementById("newFileName").value.trim();
+  if (!name) return;
+  if (name[0] !== "/") name = "/" + name;
+  if (fileContents[currentLang][name]) { alert("File already exists"); return; }
+  saveEditorToState();
+  fileContents[currentLang][name] = "";
+  currentFile = name;
+  closeNewFileModal();
+  renderFileTabs();
+  if (monacoReady) setEditorFile(currentLang, name, "");
+  if (editor) editor.focus();
+}
+
+function openRenameModal(path) {
+  renamingFile = path;
+  var inp = document.getElementById("renameInput");
+  inp.value = path;
+  document.getElementById("renameModal").classList.add("open");
+  setTimeout(function() {
+    inp.focus();
+    var s = path.lastIndexOf("/") + 1;
+    var d = path.lastIndexOf(".");
+    inp.setSelectionRange(s, d > s ? d : path.length);
+  }, 50);
+}
+
+function closeRenameModal() { document.getElementById("renameModal").classList.remove("open"); renamingFile = ""; }
+
+function confirmRename() {
+  var newName = document.getElementById("renameInput").value.trim();
+  if (!newName) return;
+  if (newName[0] !== "/") newName = "/" + newName;
+  if (newName === renamingFile) { closeRenameModal(); return; }
+  if (fileContents[currentLang][newName]) { alert("Name already taken"); return; }
+  saveEditorToState();
+  var content = fileContents[currentLang][renamingFile];
+  delete fileContents[currentLang][renamingFile];
+  fileContents[currentLang][newName] = content;
+  renameModel(currentLang, renamingFile, newName);
+  if (entryPoints[currentLang] === renamingFile) entryPoints[currentLang] = newName;
+  if (currentFile === renamingFile) currentFile = newName;
+  closeRenameModal();
+  renderFileTabs();
+  if (monacoReady) setEditorFile(currentLang, currentFile, fileContents[currentLang][currentFile] || "");
+}
+
+function escRe(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
+
+function buildInlinedPreview(files, ep) {
+  var html = files[ep] || "";
+  for (var path in files) {
+    if (path === ep) continue;
+    var content = files[path];
+    var rel = path[0] === "/" ? path.slice(1) : path;
+    var ext = path.split(".").pop().toLowerCase();
+    var escaped = escRe(rel);
+
+    if (ext === "css") {
+      var linkRe = new RegExp('<link[^>]*href=["\'](?:\\.?\\/?)' + escaped + '["\'][^>]*/?' + '>', "gi");
+      html = html.replace(linkRe, "<style>\n" + content + "\n</style>");
+    } else if (ext === "js" || ext === "mjs") {
+      var scriptRe = new RegExp('<script[^>]*src=["\'](?:\\.?\\/?)' + escaped + '["\'][^>]*>\\s*' + CLOSE_SCRIPT, "gi");
+      html = html.replace(scriptRe, "<script>\n" + content + "\n" + CLOSE_SCRIPT);
+    }
+  }
+  return html;
+}
+
+function esc(s) { return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
+
+async function runCode() {
+  if (!box) return;
+  saveEditorToState();
+  var btn = document.getElementById("runBtn");
+  var conOut = document.getElementById("consoleOutput");
+  var frame = document.getElementById("previewFrame");
+
+  btn.disabled = true;
+  conOut.innerHTML = '<span class="meta">Executing...</span>';
+
+  try {
+    var files = {};
+    for (var k in fileContents[currentLang]) files[k] = fileContents[currentLang][k];
+    var ep = entryPoints[currentLang];
+    var runnerLang = RUNNER_ALIAS[currentLang] || currentLang;
+    var result = await box.run(runnerLang, { files: files, entryPoint: ep });
+
+    var h = "";
+    if (result.stdout) h += '<span class="out">' + esc(result.stdout) + "</span>\n";
+    if (result.stderr) h += '<span class="err">' + esc(result.stderr) + "</span>\n";
+    h += '<span class="meta">\n--- exit: ' + result.exitCode + " | " + result.duration + "ms ---</span>";
+    conOut.innerHTML = h;
+
+    if (currentLang === "web") {
+      var inlined = buildInlinedPreview(files, ep);
+      frame.srcdoc = inlined;
+      if (activeOutputTab !== "preview") { activeOutputTab = "preview"; renderOutputTabs(); }
+    }
+  } catch (e) {
+    conOut.innerHTML = '<span class="err">' + esc(e.message || String(e)) + "</span>";
+  }
+
+  btn.disabled = false;
+}
+
+document.getElementById("runBtn").addEventListener("click", runCode);
+document.getElementById("newFileCancelBtn").addEventListener("click", closeNewFileModal);
+document.getElementById("newFileCreateBtn").addEventListener("click", confirmNewFile);
+document.getElementById("renameCancelBtn").addEventListener("click", closeRenameModal);
+document.getElementById("renameConfirmBtn").addEventListener("click", confirmRename);
+
+document.addEventListener("keydown", function(e) {
+  if ((e.metaKey || e.ctrlKey) && e.key === "Enter") { e.preventDefault(); runCode(); }
+  if (e.key === "Escape") { closeNewFileModal(); closeRenameModal(); }
+});
+document.getElementById("newFileName").addEventListener("keydown", function(e) {
+  if (e.key === "Enter") { e.preventDefault(); confirmNewFile(); }
+});
+document.getElementById("renameInput").addEventListener("keydown", function(e) {
+  if (e.key === "Enter") { e.preventDefault(); confirmRename(); }
+});
+
+require.config({ paths: { vs: "https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min/vs" } });
+require(["vs/editor/editor.main"], function() {
+
+  monaco.editor.defineTheme("clientbox-dark", {
+    base: "vs-dark",
+    inherit: true,
+    rules: [
+      { token: "comment", foreground: "555555" },
+      { token: "keyword", foreground: "c678dd" },
+      { token: "string", foreground: "98c379" },
+      { token: "number", foreground: "d19a66" },
+      { token: "type", foreground: "61afef" }
+    ],
+    colors: {
+      "editor.background": "#0c0c12",
+      "editor.foreground": "#c8c8d0",
+      "editor.lineHighlightBackground": "#12121e",
+      "editor.selectionBackground": "#2563eb44",
+      "editorCursor.foreground": "#2563eb",
+      "editorLineNumber.foreground": "#333",
+      "editorLineNumber.activeForeground": "#666",
+      "editorIndentGuide.background": "#1a1a24",
+      "editorWidget.background": "#16161e",
+      "editorWidget.border": "#1e1e2a",
+      "editorSuggestWidget.background": "#16161e",
+      "editorSuggestWidget.border": "#1e1e2a",
+      "editorSuggestWidget.selectedBackground": "#2563eb33",
+      "list.hoverBackground": "#1a1a28"
+    }
+  });
+
+  editor = monaco.editor.create(document.getElementById("editorContainer"), {
+    theme: "clientbox-dark",
+    fontSize: 13,
+    fontFamily: "'JetBrains Mono', 'Fira Code', 'Cascadia Code', 'Consolas', monospace",
+    fontLigatures: true,
+    minimap: { enabled: true, size: "fit" },
+    padding: { top: 12 },
+    scrollBeyondLastLine: false,
+    automaticLayout: true,
+    tabSize: 4,
+    insertSpaces: true,
+    bracketPairColorization: { enabled: true },
+    guides: { bracketPairs: true, indentation: true },
+    suggestOnTriggerCharacters: true,
+    quickSuggestions: { other: true, comments: false, strings: true },
+    parameterHints: { enabled: true },
+    wordBasedSuggestions: "allDocuments",
+    acceptSuggestionOnEnter: "on",
+    snippetSuggestions: "inline",
+    formatOnPaste: true,
+    renderWhitespace: "selection",
+    smoothScrolling: true,
+    cursorBlinking: "smooth",
+    cursorSmoothCaretAnimation: "on",
+    renderLineHighlight: "all",
+    folding: true,
+    links: true,
+    colorDecorators: true
+  });
+
+  editor.addAction({
+    id: "clientbox-run",
+    label: "Run Code",
+    keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter],
+    run: function() { runCode(); }
+  });
+
+  editor.addAction({
+    id: "clientbox-save",
+    label: "Save",
+    keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS],
+    run: function() { saveEditorToState(); }
+  });
+
+  monacoReady = true;
+
+  import("./dist/index.js").then(function(mod) {
+    box = new mod.ClientBox({
+      timeout: 60000,
+      onStatusChange: function(e) {
+        document.getElementById("statusText").textContent =
+          "[" + e.language + "] " + e.status + (e.message ? " \u2014 " + e.message : "");
+      }
+    });
+    switchLang("node");
+  }).catch(function(err) {
+    document.getElementById("consoleOutput").innerHTML =
+      '<span class="err">Failed to load clientbox: ' + esc(err.message || String(err)) +
+      "\n\nMake sure you:\n1. Run: npm run build\n2. Serve via HTTP: python3 -m http.server 3333\n3. Open: http://localhost:3333/test.html</span>";
+  });
+});
+
+})();
+</script>
+</body>
+</html>
