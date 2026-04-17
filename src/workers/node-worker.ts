@@ -298,7 +298,24 @@ self.onmessage = function(e) {
           var bd2 = 0;
           for (var k = bi; k >= 0; k--) {
             if (src[k] === '}') bd2++;
-            else if (src[k] === '{') { bd2--; if (bd2 < 0) { inObject = true; break; } }
+            else if (src[k] === '{') {
+              bd2--;
+              if (bd2 < 0) {
+                // Found unmatched {. Is it an object literal or a block?
+                var bb = k - 1;
+                while (bb >= 0 && (src[bb] === ' ' || src[bb] === '\\t' || src[bb] === '\\n' || src[bb] === '\\r')) bb--;
+                // Preceded by ) or identifier = block (class/function/if/else)
+                // Preceded by = , ( : => = object literal
+                if (bb >= 0 && /[\\w$)]/.test(src[bb])) {
+                  break;
+                } else if (bb > 0 && src[bb] === '>' && src[bb-1] === '=') {
+                  break;
+                } else {
+                  inObject = true;
+                  break;
+                }
+              }
+            }
             else if (src[k] === ';' && bd2 === 0) break;
           }
           if (!inObject) {
