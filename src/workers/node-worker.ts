@@ -293,16 +293,15 @@ self.onmessage = function(e) {
         // Check it looks like a type (starts with letter, (, [, {, or typeof)
         var looksLikeType = fi < len && /[A-Za-z_$(\\[{]/.test(src[fi]);
         if (isAfterIdent && looksLikeType) {
-          // Check we're NOT inside a destructuring pattern { a: b }
-          var inDestructure = false;
+          // Check we're NOT inside an object literal { key: value }
+          var inObject = false;
           var bd2 = 0;
           for (var k = bi; k >= 0; k--) {
             if (src[k] === '}') bd2++;
-            else if (src[k] === '{') { bd2--; if (bd2 < 0) { inDestructure = true; break; } }
-            else if (src[k] === ';' || src[k] === '\\n' && bd2 === 0) break;
-            else if (src[k] === '=' && bd2 === 0) break;
+            else if (src[k] === '{') { bd2--; if (bd2 < 0) { inObject = true; break; } }
+            else if (src[k] === ';' && bd2 === 0) break;
           }
-          if (!inDestructure) {
+          if (!inObject) {
             // Skip the type annotation by tracking bracket depth
             var dp = 0, db = 0, da = 0, dc = 0;
             var j = fi;
@@ -318,6 +317,12 @@ self.onmessage = function(e) {
               else if (c === '}') { if (dc === 0) break; dc--; }
               else if ((c === '=' || c === ',' || c === ';') && dp === 0 && db === 0 && da === 0 && dc === 0) break;
               j++;
+            }
+            // For optional params (name?: Type), also remove the ? from result
+            if (src[bi] === '?') {
+              var ti = result.length - 1;
+              while (ti >= 0 && (result[ti] === ' ' || result[ti] === '\\t')) ti--;
+              if (ti >= 0 && result[ti] === '?') result = result.substring(0, ti);
             }
             // Skip colon and type, keep the terminator
             i = j;
