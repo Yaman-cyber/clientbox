@@ -208,8 +208,8 @@ self.onmessage = function(e) {
     // Remove 'as Type' casts
     code = code.replace(/\\s+as\\s+(?:const|string|number|boolean|any|unknown|\\w+(?:<[^>]+>)?(?:\\[\\])*)/g, '');
 
-    // Remove non-null assertions: x! -> x
-    code = code.replace(/(\\w+)!/g, '$1');
+    // Remove non-null assertions: x! -> x (scanner-based; must not touch strings/comments)
+    code = removeNonNullAssertions(code);
 
     // Remove access modifiers
     code = code.replace(/\\b(public|private|protected|readonly)\\s+/g, '');
@@ -238,6 +238,93 @@ self.onmessage = function(e) {
     code = removeColonTypes(code);
 
     return code;
+  }
+
+  function removeNonNullAssertions(src) {
+    var result = '';
+    var i = 0;
+    var len = src.length;
+    var BT = String.fromCharCode(96);
+
+    function isWs(c) { return c === ' ' || c === '\\t' || c === '\\n' || c === '\\r'; }
+    function prevNonWs(idx) {
+      var j = idx;
+      while (j >= 0 && isWs(src[j])) j--;
+      return j;
+    }
+    function nextNonWs(idx) {
+      var j = idx;
+      while (j < len && isWs(src[j])) j++;
+      return j;
+    }
+
+    while (i < len) {
+      // Skip string literals
+      if (src[i] === '"' || src[i] === "'" || src[i] === BT) {
+        var q = src[i];
+        result += src[i++];
+        while (i < len && src[i] !== q) {
+          if (src[i] === '\\\\') { result += src[i++]; if (i < len) result += src[i++]; continue; }
+          if (q === BT && src[i] === '$' && src[i+1] === '{') {
+            result += src[i++]; result += src[i++];
+            var bd = 1;
+            while (i < len && bd > 0) {
+              if (src[i] === '{') bd++;
+              else if (src[i] === '}') bd--;
+              if (bd > 0) result += src[i];
+              i++;
+            }
+            result += '}';
+            continue;
+          }
+          result += src[i++];
+        }
+        if (i < len) result += src[i++];
+        continue;
+      }
+
+      // Skip comments
+      if (src[i] === '/' && i + 1 < len && src[i+1] === '/') {
+        while (i < len && src[i] !== '\\n') result += src[i++];
+        continue;
+      }
+      if (src[i] === '/' && i + 1 < len && src[i+1] === '*') {
+        result += src[i++]; result += src[i++];
+        while (i < len - 1 && !(src[i] === '*' && src[i+1] === '/')) result += src[i++];
+        if (i < len) { result += src[i++]; result += src[i++]; }
+        continue;
+      }
+
+      // Candidate non-null assertion: postfix '!' after an expression
+      if (src[i] === '!') {
+        // Don't touch !=, !==, or prefix ! (logical not)
+        if (i + 1 < len && src[i+1] === '=') { result += src[i++]; continue; }
+
+        var p = prevNonWs(i - 1);
+        var n = nextNonWs(i + 1);
+
+        // Postfix expressions commonly end with identifier, ], ), or }
+        var prevOk = p >= 0 && /[\\w$\\]\\)\\}]/.test(src[p]);
+        // Next token should be a selector/call or terminator, not an identifier/number
+        var nextCh = n < len ? src[n] : '';
+        var nextOk =
+          n >= len ||
+          nextCh === '.' || nextCh === '[' || nextCh === '(' ||
+          nextCh === ',' || nextCh === ';' || nextCh === ')' || nextCh === ']' || nextCh === '}' ||
+          nextCh === '?' || nextCh === ':' ||
+          nextCh === '\\n' || nextCh === '\\r';
+
+        if (prevOk && nextOk) {
+          // Drop this '!' (non-null assertion)
+          i++;
+          continue;
+        }
+      }
+
+      result += src[i++];
+    }
+
+    return result;
   }
 
   function removeColonTypes(src) {
