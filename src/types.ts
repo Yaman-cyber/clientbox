@@ -18,8 +18,19 @@ export interface RunOptions {
   files: Record<string, string>;
   /** The file path to execute as the entry point (e.g. "/index.js") */
   entryPoint: string;
-  /** Optional stdin string to feed to the program */
+  /** Optional stdin string to feed to the program. Consumed line-by-line before onInput is called. */
   stdin?: string;
+  /**
+   * Called when the program requests input interactively (e.g. Python's `input()`).
+   * Return the line of input (without trailing newline) or null to signal EOF.
+   * Currently supported by the Python runner; requires the host page to be cross-origin isolated
+   * (COOP/COEP headers) so SharedArrayBuffer is available.
+   */
+  onInput?: (prompt: string) => string | null | Promise<string | null>;
+  /** Streamed stdout chunks as they are produced (currently Python runner). */
+  onStdout?: (chunk: string) => void;
+  /** Streamed stderr chunks as they are produced (currently Python runner). */
+  onStderr?: (chunk: string) => void;
   /** Override execution timeout for this run (ms) */
   timeout?: number;
 }

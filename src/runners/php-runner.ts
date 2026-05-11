@@ -8,22 +8,63 @@ function buildPhpHarness(): string {
 
 var runtimeReady = false;
 var pendingMessages = [];
+var pendingInput = null;
+var currentRunId = null;
 
 window.addEventListener('message', function(e) {
-  if (e.data && e.data.type === 'clientbox-run') {
+  if (!e.data) return;
+  if (e.data.type === 'clientbox-run') {
     if (runtimeReady) {
       handleRun(e.data);
     } else {
       pendingMessages.push(e.data);
     }
+    return;
+  }
+  if (e.data.type === 'clientbox-input-response' && pendingInput && e.data.id === pendingInput.id) {
+    var resolver = pendingInput.resolve;
+    pendingInput = null;
+    resolver(e.data.value);
   }
 });
 
-function handleRun(msg) {
+function requestInput(promptText) {
+  return new Promise(function(resolve) {
+    pendingInput = { id: currentRunId, resolve: resolve };
+    parent.postMessage({
+      type: 'clientbox-input-request',
+      id: currentRunId,
+      prompt: promptText || ''
+    }, '*');
+  });
+}
+
+async function handleRun(msg) {
   var stdout = [];
   var stderr = [];
   var error = null;
   var exitCode = 0;
+  currentRunId = msg.id;
+
+  var stdinLines = msg.stdin ? msg.stdin.split('\\n') : [];
+  var stdinIndex = 0;
+
+  function emitStdoutRaw(text) {
+    stdout.push(text);
+    parent.postMessage({ type: 'clientbox-stdout', id: msg.id, chunk: text }, '*');
+  }
+
+  async function readLineAsync(promptText) {
+    if (promptText !== undefined && promptText !== null && promptText !== '') {
+      emitStdoutRaw(String(promptText));
+    }
+    if (stdinIndex < stdinLines.length) {
+      var line = stdinLines[stdinIndex++];
+      if (line === '' && stdinIndex === stdinLines.length) return null;
+      return line;
+    }
+    return await requestInput(promptText || '');
+  }
 
   try {
     var files = msg.files || {};
@@ -32,7 +73,9 @@ function handleRun(msg) {
     if (!code) throw new Error('Entry point not found: ' + entryPoint);
 
     var allCode = Object.keys(files).map(function(k) { return files[k]; }).join('\\n');
-    var result = executePhp(allCode);
+    var result = await executePhp(allCode, emitStdoutRaw, readLineAsync);
+    // executePhp now emits incrementally via emitStdoutRaw, so result.stdout
+    // is the same lines already streamed. Use it as the final aggregated value.
     stdout = result.stdout;
     stderr = result.stderr;
     if (result.error) {
@@ -48,35 +91,159 @@ function handleRun(msg) {
   parent.postMessage({
     type: 'clientbox-result',
     id: msg.id,
-    stdout: stdout.join('\\n'),
+    stdout: stdout.join(''),
     stderr: stderr.join('\\n'),
     error: error,
     exitCode: exitCode
   }, '*');
 }
 
-function executePhp(code) {
+async function executePhp(code, emitStdoutRaw, readLineAsync) {
   var stdout = [];
   var stderr = [];
   var error = null;
 
   try {
     var jsCode = transpilePhpToJS(code);
-    var fn = new Function('__echo', '__stdout', jsCode);
-    fn(function() {
+    var AsyncFunction = Object.getPrototypeOf(async function(){}).constructor;
+    var fn = new AsyncFunction('__echo', '__stdout', '__input', '__readline', jsCode);
+    await fn(function() {
       var parts = [];
       for (var i = 0; i < arguments.length; i++) {
         parts.push(arguments[i] === null ? 'null' :
                    arguments[i] === undefined ? '' : String(arguments[i]));
       }
-      stdout.push(parts.join(''));
-    }, stdout);
+      var text = parts.join('');
+      stdout.push(text);
+      emitStdoutRaw(text);
+    }, stdout, readLineAsync, readLineAsync);
   } catch(e) {
     error = e.message || String(e);
     stderr.push(error);
   }
 
   return { stdout: stdout, stderr: stderr, error: error };
+}
+
+// String-aware PHP-to-JS rewrites for a single line:
+//   - "..." strings: convert PHP $var interpolation into JS template literal \${__v_var}
+//     and switch to backtick delimiters; preserve everything else
+//   - '...' strings: copy verbatim (PHP does not interpolate single-quoted strings)
+//   - outside strings: \$varname -> __v_varname, '.' -> ' + ' (concat), but skip
+//     '.' between digits so decimal literals (3.14) survive
+function rewritePhpExpr(src) {
+  var result = '';
+  var i = 0;
+  var len = src.length;
+
+  while (i < len) {
+    var c = src[i];
+
+    if (c === '"') {
+      var content = '';
+      var hasInterp = false;
+      i++;
+      while (i < len && src[i] !== '"') {
+        if (src[i] === '\\\\' && i + 1 < len) {
+          content += src[i] + src[i + 1];
+          i += 2;
+          continue;
+        }
+        if (src[i] === '$' && i + 1 < len && /[a-zA-Z_]/.test(src[i + 1])) {
+          hasInterp = true;
+          i++;
+          var name = '';
+          while (i < len && /\\w/.test(src[i])) { name += src[i++]; }
+          content += '\${__v_' + name + '}';
+          continue;
+        }
+        if (src[i] === '\`') { content += '\\\\\`'; i++; continue; }
+        if (src[i] === '$' && src[i + 1] === '{') { content += '\\\\\${'; i += 2; continue; }
+        content += src[i++];
+      }
+      if (i < len) i++; // skip closing "
+      if (hasInterp) result += '\`' + content + '\`';
+      else result += '"' + content + '"';
+      continue;
+    }
+
+    if (c === "'") {
+      result += c;
+      i++;
+      while (i < len && src[i] !== "'") {
+        if (src[i] === '\\\\' && i + 1 < len) {
+          result += src[i] + src[i + 1];
+          i += 2;
+          continue;
+        }
+        result += src[i++];
+      }
+      if (i < len) result += src[i++];
+      continue;
+    }
+
+    if (c === '$' && i + 1 < len && /[a-zA-Z_]/.test(src[i + 1])) {
+      result += '__v_';
+      i++;
+      continue;
+    }
+
+    if (c === '.') {
+      var prev = i > 0 ? src[i - 1] : '';
+      var next = i + 1 < len ? src[i + 1] : '';
+      if (/\\d/.test(prev) && /\\d/.test(next)) {
+        result += c;
+        i++;
+        continue;
+      }
+      result += ' + ';
+      i++;
+      continue;
+    }
+
+    result += c;
+    i++;
+  }
+
+  return result;
+}
+
+// Wraps balanced fn(...) calls as (await fn(...)) for the given function names.
+function wrapAwaitCalls(src, names) {
+  for (var ni = 0; ni < names.length; ni++) {
+    var name = names[ni];
+    var result = '';
+    var i = 0;
+    while (i < src.length) {
+      // Match name followed by optional whitespace and '(', with word boundary before.
+      var charBefore = i === 0 ? '' : src[i - 1];
+      if (
+        (i === 0 || /[^a-zA-Z0-9_$]/.test(charBefore)) &&
+        src.substr(i, name.length) === name
+      ) {
+        var j = i + name.length;
+        while (j < src.length && (src[j] === ' ' || src[j] === '\\t')) j++;
+        if (src[j] === '(') {
+          var depth = 1;
+          var k = j + 1;
+          while (k < src.length && depth > 0) {
+            if (src[k] === '(') depth++;
+            else if (src[k] === ')') depth--;
+            if (depth > 0) k++;
+          }
+          if (depth === 0) {
+            // Wrap with (await ...)
+            result += '(await ' + src.substring(i, k + 1) + ')';
+            i = k + 1;
+            continue;
+          }
+        }
+      }
+      result += src[i++];
+    }
+    src = result;
+  }
+  return src;
 }
 
 function transpilePhpToJS(code) {
@@ -137,6 +304,9 @@ function transpilePhpToJS(code) {
   output.push('function var_dump(v) { __echo(typeof v + "(" + JSON.stringify(v) + ")"); }');
   output.push('function json_encode(v) { return JSON.stringify(v); }');
   output.push('function json_decode(s) { return JSON.parse(s); }');
+  output.push('async function readline(p) { return await __readline(p); }');
+  output.push('async function fgets(_h) { return await __readline(""); }');
+  output.push('var STDIN = "STDIN";');
   output.push('');
 
   for (var i = 0; i < lines.length; i++) {
@@ -155,11 +325,12 @@ function transpilePhpToJS(code) {
       trimmed = trimmed.replace(/;\\s*$/, '') + ');';
     }
 
-    // $ variable prefix -> remove
-    trimmed = trimmed.replace(/\\$(\\w+)/g, '__v_$1');
+    // String-aware rewrite: $var -> __v_var (outside strings), '.' -> ' + ' (concat),
+    // and PHP "..." interpolation -> JS template literal with \${__v_var}.
+    trimmed = rewritePhpExpr(trimmed);
 
-    // . string concat -> +
-    trimmed = trimmed.replace(/\\s*\\.\\s*/g, ' + ');
+    // Insert await before readline()/fgets() calls so user code reads synchronously.
+    trimmed = wrapAwaitCalls(trimmed, ['readline', 'fgets']);
 
     // function declarations are compatible
     // foreach ($arr as $val) -> for (var __v_val of __v_arr)
@@ -279,17 +450,48 @@ export class PhpRunner extends BaseRunner {
     options: RunOptions
   ): Promise<RunResult> {
     return new Promise((resolve, _reject) => {
-      const handler = (e: MessageEvent) => {
+      let pendingStdout = '';
+
+      const handler = async (e: MessageEvent) => {
         if (e.source !== iframe.contentWindow) return;
-        if (e.data?.type !== 'clientbox-result' || e.data?.id !== id) return;
-        window.removeEventListener('message', handler);
-        resolve({
-          stdout: e.data.stdout || '',
-          stderr: e.data.stderr || '',
-          error: e.data.error || null,
-          exitCode: e.data.exitCode ?? 0,
-          duration: 0,
-        });
+        const data = e.data;
+        if (!data || data.id !== id) return;
+        if (data.type === 'clientbox-stdout') {
+          pendingStdout += data.chunk;
+          options.onStdout?.(data.chunk);
+          return;
+        }
+        if (data.type === 'clientbox-stderr') {
+          options.onStderr?.(data.chunk);
+          return;
+        }
+        if (data.type === 'clientbox-input-request') {
+          const promptText = pendingStdout || data.prompt || '';
+          pendingStdout = '';
+          let value: string | null = null;
+          if (options.onInput) {
+            try {
+              value = await options.onInput(promptText);
+            } catch {
+              value = null;
+            }
+          }
+          iframe.contentWindow!.postMessage(
+            { type: 'clientbox-input-response', id, value },
+            '*'
+          );
+          return;
+        }
+        if (data.type === 'clientbox-result') {
+          window.removeEventListener('message', handler);
+          resolve({
+            stdout: data.stdout || '',
+            stderr: data.stderr || '',
+            error: data.error || null,
+            exitCode: data.exitCode ?? 0,
+            duration: 0,
+          });
+        }
       };
 
       window.addEventListener('message', handler);

@@ -4,6 +4,11 @@ import type { ClientBoxConfig, RunOptions, RunResult, WorkerResponse } from '../
 
 const DEFAULT_PYODIDE_CDN = 'https://cdn.jsdelivr.net/pyodide/v0.27.0/full/';
 
+// Shared-buffer layout — must match the worker.
+const CTRL_INTS = 2;
+const CTRL_BYTES = CTRL_INTS * 4;
+const INPUT_BUFFER_BYTES = 64 * 1024;
+
 export class PythonRunner extends BaseRunner {
   private worker: Worker | null = null;
   private initPromise: Promise<void> | null = null;
@@ -88,18 +93,84 @@ export class PythonRunner extends BaseRunner {
     id: string,
     options: RunOptions
   ): Promise<RunResult> {
+    const wantsInteractiveInput = typeof options.onInput === 'function';
+    let sab: SharedArrayBuffer | null = null;
+    let ctrl: Int32Array | null = null;
+    let dataView: Uint8Array | null = null;
+
+    if (wantsInteractiveInput) {
+      const SAB = (globalThis as { SharedArrayBuffer?: SharedArrayBufferConstructor }).SharedArrayBuffer;
+      const isolated = (globalThis as { crossOriginIsolated?: boolean }).crossOriginIsolated;
+      if (!SAB || isolated === false) {
+        return Promise.reject(
+          new Error(
+            'Interactive Python input requires SharedArrayBuffer. ' +
+              'Serve the host page with COOP/COEP headers ' +
+              '(Cross-Origin-Opener-Policy: same-origin, Cross-Origin-Embedder-Policy: require-corp) ' +
+              'so window.crossOriginIsolated is true.'
+          )
+        );
+      }
+      sab = new SAB(CTRL_BYTES + INPUT_BUFFER_BYTES);
+      ctrl = new Int32Array(sab, 0, CTRL_INTS);
+      dataView = new Uint8Array(sab, CTRL_BYTES);
+    }
+
     return new Promise((resolve, reject) => {
-      const handler = (e: MessageEvent<WorkerResponse>) => {
-        if (e.data.id !== id) return;
-        worker.removeEventListener('message', handler);
-        worker.removeEventListener('error', errHandler);
-        resolve({
-          stdout: e.data.stdout,
-          stderr: e.data.stderr,
-          error: e.data.error,
-          exitCode: e.data.exitCode,
-          duration: 0,
-        });
+      const handleInputRequest = async () => {
+        if (!ctrl || !dataView || !options.onInput) return;
+        try {
+          // Latest stdout so far is the prompt; we hand it to the caller.
+          const prompt = pendingStdout;
+          pendingStdout = '';
+          const result = await options.onInput(prompt);
+          if (result === null || result === undefined) {
+            Atomics.store(ctrl, 1, 0);
+            Atomics.store(ctrl, 0, 2); // EOF
+          } else {
+            const bytes = new TextEncoder().encode(String(result));
+            const len = Math.min(bytes.length, dataView.byteLength);
+            dataView.set(bytes.subarray(0, len), 0);
+            Atomics.store(ctrl, 1, len);
+            Atomics.store(ctrl, 0, 1); // ready
+          }
+        } catch {
+          Atomics.store(ctrl, 1, 0);
+          Atomics.store(ctrl, 0, 2);
+        }
+        Atomics.notify(ctrl, 0);
+      };
+
+      let pendingStdout = '';
+
+      const handler = (e: MessageEvent) => {
+        const data = e.data;
+        if (data.id !== id) return;
+        if (data.type === 'stdout') {
+          pendingStdout += data.chunk;
+          options.onStdout?.(data.chunk);
+          return;
+        }
+        if (data.type === 'stderr') {
+          options.onStderr?.(data.chunk);
+          return;
+        }
+        if (data.type === 'input-request') {
+          void handleInputRequest();
+          return;
+        }
+        if (data.type === 'result' || data.type === 'error') {
+          const response = data as WorkerResponse;
+          worker.removeEventListener('message', handler);
+          worker.removeEventListener('error', errHandler);
+          resolve({
+            stdout: response.stdout,
+            stderr: response.stderr,
+            error: response.error,
+            exitCode: response.exitCode,
+            duration: 0,
+          });
+        }
       };
 
       const errHandler = (e: ErrorEvent) => {
@@ -116,6 +187,7 @@ export class PythonRunner extends BaseRunner {
         files: options.files,
         entryPoint: options.entryPoint,
         stdin: options.stdin,
+        sab,
       });
     });
   }

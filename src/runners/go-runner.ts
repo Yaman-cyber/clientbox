@@ -8,22 +8,60 @@ function buildGoHarness(): string {
 
 var runtimeReady = false;
 var pendingMessages = [];
+var pendingInput = null;
+var currentRunId = null;
 
 window.addEventListener('message', function(e) {
-  if (e.data && e.data.type === 'clientbox-run') {
+  if (!e.data) return;
+  if (e.data.type === 'clientbox-run') {
     if (runtimeReady) {
       handleRun(e.data);
     } else {
       pendingMessages.push(e.data);
     }
+    return;
+  }
+  if (e.data.type === 'clientbox-input-response' && pendingInput && e.data.id === pendingInput.id) {
+    var resolver = pendingInput.resolve;
+    pendingInput = null;
+    resolver(e.data.value);
   }
 });
 
-function handleRun(msg) {
+function requestInput(promptText) {
+  return new Promise(function(resolve) {
+    pendingInput = { id: currentRunId, resolve: resolve };
+    parent.postMessage({
+      type: 'clientbox-input-request',
+      id: currentRunId,
+      prompt: promptText || ''
+    }, '*');
+  });
+}
+
+async function handleRun(msg) {
   var stdout = [];
   var stderr = [];
   var error = null;
   var exitCode = 0;
+  currentRunId = msg.id;
+
+  var stdinLines = msg.stdin ? msg.stdin.split('\\n') : [];
+  var stdinIndex = 0;
+
+  function emitStdout(text) {
+    stdout.push(text);
+    parent.postMessage({ type: 'clientbox-stdout', id: msg.id, chunk: text }, '*');
+  }
+
+  async function readLineAsync() {
+    if (stdinIndex < stdinLines.length) {
+      var line = stdinLines[stdinIndex++];
+      if (line === '' && stdinIndex === stdinLines.length) return null;
+      return line;
+    }
+    return await requestInput('');
+  }
 
   try {
     var files = msg.files || {};
@@ -32,8 +70,7 @@ function handleRun(msg) {
     if (!code) throw new Error('Entry point not found: ' + entryPoint);
 
     var allCode = Object.keys(files).map(function(k) { return files[k]; }).join('\\n');
-    var result = executeGo(allCode);
-    stdout = result.stdout;
+    var result = await executeGo(allCode, emitStdout, readLineAsync);
     stderr = result.stderr;
     if (result.error) {
       error = result.error;
@@ -48,36 +85,66 @@ function handleRun(msg) {
   parent.postMessage({
     type: 'clientbox-result',
     id: msg.id,
-    stdout: stdout.join('\\n'),
+    stdout: stdout.join(''),
     stderr: stderr.join('\\n'),
     error: error,
     exitCode: exitCode
   }, '*');
 }
 
-function executeGo(code) {
-  var stdout = [];
+async function executeGo(code, emitStdout, readLineAsync) {
   var stderr = [];
   var error = null;
 
   try {
     var jsCode = transpileGoToJS(code);
-    var fn = new Function('fmt', 'math', 'strings', 'strconv', jsCode);
-    fn(
-      buildFmt(stdout),
+    var AsyncFunction = Object.getPrototypeOf(async function(){}).constructor;
+    var fn = new AsyncFunction('fmt', 'math', 'strings', 'strconv', 'bufio', 'os', jsCode);
+    await fn(
+      buildFmt(emitStdout, readLineAsync),
       buildMathPkg(),
       buildStringsPkg(),
-      buildStrconvPkg()
+      buildStrconvPkg(),
+      buildBufioPkg(readLineAsync),
+      { Stdin: 'STDIN', Stdout: 'STDOUT', Stderr: 'STDERR' }
     );
   } catch(e) {
     error = e.message || String(e);
     stderr.push(error);
   }
 
-  return { stdout: stdout, stderr: stderr, error: error };
+  return { stderr: stderr, error: error };
 }
 
-function buildFmt(stdout) {
+function buildBufioPkg(readLineAsync) {
+  return {
+    NewReader: function() {
+      return {
+        ReadString: async function() {
+          var line = await readLineAsync();
+          return [line === null ? '' : line + '\\n', line === null ? new Error('EOF') : null];
+        },
+        ReadLine: async function() {
+          var line = await readLineAsync();
+          return [line === null ? '' : line, false, line === null ? new Error('EOF') : null];
+        }
+      };
+    },
+    NewScanner: function() {
+      var lastLine = null;
+      return {
+        Scan: async function() {
+          var line = await readLineAsync();
+          lastLine = line;
+          return line !== null;
+        },
+        Text: function() { return lastLine || ''; }
+      };
+    }
+  };
+}
+
+function buildFmt(emitStdout, readLineAsync) {
   function sprintArgs(args) {
     var parts = [];
     for (var i = 0; i < args.length; i++) {
@@ -106,14 +173,14 @@ function buildFmt(stdout) {
 
   return {
     Println: function() {
-      stdout.push(sprintArgs(Array.from(arguments)));
+      emitStdout(sprintArgs(Array.from(arguments)) + '\\n');
     },
     Print: function() {
-      stdout.push(sprintArgs(Array.from(arguments)));
+      emitStdout(sprintArgs(Array.from(arguments)));
     },
     Printf: function(format) {
       var args = Array.prototype.slice.call(arguments, 1);
-      stdout.push(sprintfFmt(format, args));
+      emitStdout(sprintfFmt(format, args));
     },
     Sprintf: function(format) {
       var args = Array.prototype.slice.call(arguments, 1);
@@ -121,6 +188,16 @@ function buildFmt(stdout) {
     },
     Sprint: function() {
       return sprintArgs(Array.from(arguments));
+    },
+    Scanln: async function() {
+      // Returns the read line. User code with fmt.Scanln(&x) is rewritten to
+      // (x = await fmt.Scanln()).
+      var line = await readLineAsync();
+      return line === null ? '' : line;
+    },
+    Scan: async function() {
+      var line = await readLineAsync();
+      return line === null ? '' : line;
     }
   };
 }
@@ -256,10 +333,12 @@ function transpileGoToJS(code) {
   output.push('function float64(v) { return parseFloat(v) || 0; }');
   output.push('');
 
-  // Emit helper functions
+  // Emit helper functions. Mark async if the body uses await.
   for (var m = 0; m < functions.length; m++) {
-    output.push('function ' + functions[m].name + '(' + functions[m].params + ') {');
-    output.push(transformGoBody(functions[m].body));
+    var fnBody = transformGoBody(functions[m].body);
+    var needsAsync = fnBody.indexOf('await ') !== -1;
+    output.push((needsAsync ? 'async ' : '') + 'function ' + functions[m].name + '(' + functions[m].params + ') {');
+    output.push(fnBody);
     output.push('}');
     output.push('');
   }
@@ -289,6 +368,16 @@ function parseGoParams(params) {
 
 function transformGoBody(body) {
   var result = body;
+
+  // fmt.Scanln(&x) / fmt.Scan(&x) -> (x = await fmt.Scanln())
+  result = result.replace(/fmt\\.Scanln\\s*\\(\\s*&(\\w+)\\s*\\)/g, '($1 = await fmt.Scanln())');
+  result = result.replace(/fmt\\.Scan\\s*\\(\\s*&(\\w+)\\s*\\)/g, '($1 = await fmt.Scan())');
+
+  // bufio reader.ReadString('\\n') / .ReadLine() / scanner.Scan() are async — wrap with await.
+  result = result.replace(/(\\w+)\\.ReadString\\s*\\(([^)]*)\\)/g, '(await $1.ReadString($2))');
+  result = result.replace(/(\\w+)\\.ReadLine\\s*\\(\\s*\\)/g, '(await $1.ReadLine())');
+  // Bare scanner.Scan() — only when used as boolean (e.g. inside for/if). Always-await is safe; it returns a Promise<bool> awaited to bool.
+  result = result.replace(/(\\w+)\\.Scan\\s*\\(\\s*\\)/g, '(await $1.Scan())');
 
   // Slice literals: []type{...} -> [...]  (must replace matching braces)
   result = result.replace(/\\[\\]\\w+\\{([^}]*)\\}/g, '[$1]');
@@ -460,17 +549,48 @@ export class GoRunner extends BaseRunner {
     options: RunOptions
   ): Promise<RunResult> {
     return new Promise((resolve, _reject) => {
-      const handler = (e: MessageEvent) => {
+      let pendingStdout = '';
+
+      const handler = async (e: MessageEvent) => {
         if (e.source !== iframe.contentWindow) return;
-        if (e.data?.type !== 'clientbox-result' || e.data?.id !== id) return;
-        window.removeEventListener('message', handler);
-        resolve({
-          stdout: e.data.stdout || '',
-          stderr: e.data.stderr || '',
-          error: e.data.error || null,
-          exitCode: e.data.exitCode ?? 0,
-          duration: 0,
-        });
+        const data = e.data;
+        if (!data || data.id !== id) return;
+        if (data.type === 'clientbox-stdout') {
+          pendingStdout += data.chunk;
+          options.onStdout?.(data.chunk);
+          return;
+        }
+        if (data.type === 'clientbox-stderr') {
+          options.onStderr?.(data.chunk);
+          return;
+        }
+        if (data.type === 'clientbox-input-request') {
+          const promptText = pendingStdout || data.prompt || '';
+          pendingStdout = '';
+          let value: string | null = null;
+          if (options.onInput) {
+            try {
+              value = await options.onInput(promptText);
+            } catch {
+              value = null;
+            }
+          }
+          iframe.contentWindow!.postMessage(
+            { type: 'clientbox-input-response', id, value },
+            '*'
+          );
+          return;
+        }
+        if (data.type === 'clientbox-result') {
+          window.removeEventListener('message', handler);
+          resolve({
+            stdout: data.stdout || '',
+            stderr: data.stderr || '',
+            error: data.error || null,
+            exitCode: data.exitCode ?? 0,
+            duration: 0,
+          });
+        }
       };
 
       window.addEventListener('message', handler);

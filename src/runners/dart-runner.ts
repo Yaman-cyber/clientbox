@@ -8,22 +8,60 @@ function buildDartHarness(): string {
 
 var runtimeReady = false;
 var pendingMessages = [];
+var pendingInput = null;
+var currentRunId = null;
 
 window.addEventListener('message', function(e) {
-  if (e.data && e.data.type === 'clientbox-run') {
+  if (!e.data) return;
+  if (e.data.type === 'clientbox-run') {
     if (runtimeReady) {
       handleRun(e.data);
     } else {
       pendingMessages.push(e.data);
     }
+    return;
+  }
+  if (e.data.type === 'clientbox-input-response' && pendingInput && e.data.id === pendingInput.id) {
+    var resolver = pendingInput.resolve;
+    pendingInput = null;
+    resolver(e.data.value);
   }
 });
 
-function handleRun(msg) {
+function requestInput(promptText) {
+  return new Promise(function(resolve) {
+    pendingInput = { id: currentRunId, resolve: resolve };
+    parent.postMessage({
+      type: 'clientbox-input-request',
+      id: currentRunId,
+      prompt: promptText || ''
+    }, '*');
+  });
+}
+
+async function handleRun(msg) {
   var stdout = [];
   var stderr = [];
   var error = null;
   var exitCode = 0;
+  currentRunId = msg.id;
+
+  var stdinLines = msg.stdin ? msg.stdin.split('\\n') : [];
+  var stdinIndex = 0;
+
+  function emitStdout(text) {
+    stdout.push(text);
+    parent.postMessage({ type: 'clientbox-stdout', id: msg.id, chunk: text }, '*');
+  }
+
+  async function readLineAsync() {
+    if (stdinIndex < stdinLines.length) {
+      var line = stdinLines[stdinIndex++];
+      if (line === '' && stdinIndex === stdinLines.length) return null;
+      return line;
+    }
+    return await requestInput('');
+  }
 
   try {
     var files = msg.files || {};
@@ -32,8 +70,7 @@ function handleRun(msg) {
     if (!code) throw new Error('Entry point not found: ' + entryPoint);
 
     var allCode = Object.keys(files).map(function(k) { return files[k]; }).join('\\n');
-    var result = executeDart(allCode);
-    stdout = result.stdout;
+    var result = await executeDart(allCode, emitStdout, readLineAsync);
     stderr = result.stderr;
     if (result.error) {
       error = result.error;
@@ -48,35 +85,43 @@ function handleRun(msg) {
   parent.postMessage({
     type: 'clientbox-result',
     id: msg.id,
-    stdout: stdout.join('\\n'),
+    stdout: stdout.join(''),
     stderr: stderr.join('\\n'),
     error: error,
     exitCode: exitCode
   }, '*');
 }
 
-function executeDart(code) {
-  var stdout = [];
+async function executeDart(code, emitStdout, readLineAsync) {
   var stderr = [];
   var error = null;
 
   try {
     var jsCode = transpileDartToJS(code);
-    var fn = new Function('__print', jsCode);
-    fn(function() {
+    var __print = function() {
       var parts = [];
       for (var i = 0; i < arguments.length; i++) {
         parts.push(arguments[i] === null ? 'null' :
                    arguments[i] === undefined ? '' : String(arguments[i]));
       }
-      stdout.push(parts.join(''));
-    });
+      emitStdout(parts.join('') + '\\n');
+    };
+    var __stdout = {
+      write: function(s) { emitStdout(String(s)); },
+      writeln: function(s) { emitStdout(String(s) + '\\n'); }
+    };
+    var __stdin = {
+      readLineSync: async function() { return await readLineAsync(); }
+    };
+    var AsyncFunction = Object.getPrototypeOf(async function(){}).constructor;
+    var fn = new AsyncFunction('__print', '__stdout', '__stdin', jsCode);
+    await fn(__print, __stdout, __stdin);
   } catch(e) {
     error = e.message || String(e);
     stderr.push(error);
   }
 
-  return { stdout: stdout, stderr: stderr, error: error };
+  return { stderr: stderr, error: error };
 }
 
 function extractBraceBlock(src, openIdx) {
@@ -137,10 +182,12 @@ function transpileDartToJS(code) {
   output.push('function List_from(iter) { return Array.from(iter); }');
   output.push('');
 
-  // Emit helper functions first
+  // Emit helper functions first. Mark async if the body uses await.
   for (var m = 0; m < functions.length; m++) {
-    output.push('function ' + functions[m].name + '(' + functions[m].params + ') {');
-    output.push(transformDartBody(functions[m].body));
+    var fnBody = transformDartBody(functions[m].body);
+    var needsAsync = fnBody.indexOf('await ') !== -1;
+    output.push((needsAsync ? 'async ' : '') + 'function ' + functions[m].name + '(' + functions[m].params + ') {');
+    output.push(fnBody);
     output.push('}');
     output.push('');
   }
@@ -161,6 +208,13 @@ function transformDartBody(body) {
   // print() -> __print()
   result = result.replace(/\\bprint\\s*\\(/g, '__print(');
 
+  // stdout.write / stdout.writeln route through our injected __stdout.
+  result = result.replace(/\\bstdout\\.write\\b/g, '__stdout.write');
+  result = result.replace(/\\bstdout\\.writeln\\b/g, '__stdout.writeln');
+
+  // stdin.readLineSync() is async under the hood — wrap with await.
+  result = result.replace(/\\bstdin\\.readLineSync\\s*\\(\\s*\\)/g, '(await __stdin.readLineSync())');
+
   // Dart string interpolation: dollar-var and dollar-brace-expr -> JS template literal
   // Convert single-quoted strings with interpolation to template literals
   result = result.replace(/'([^']*\\$[^']*)'/g, function(_, inner) {
@@ -171,19 +225,20 @@ function transformDartBody(body) {
   });
 
   // Variable declarations: int x = 5; -> var x = 5;
+  // The optional \\?? after the type matches Dart's nullable type marker (e.g. "String? name").
   result = result.replace(
-    /\\b(int|double|num|bool|String|dynamic|var|final|const)\\s+(\\w+)\\s*=/g,
+    /\\b(int|double|num|bool|String|dynamic|var|final|const)\\??\\s+(\\w+)\\s*=/g,
     'var $2 ='
   );
   result = result.replace(
-    /\\b(int|double|num|bool|String|dynamic)\\s+(\\w+)\\s*;/g,
+    /\\b(int|double|num|bool|String|dynamic)\\??\\s+(\\w+)\\s*;/g,
     'var $2;'
   );
 
-  // List<T> x = [...] -> var x = [...]
-  result = result.replace(/\\bList<[^>]+>\\s+(\\w+)\\s*=/g, 'var $1 =');
-  result = result.replace(/\\bMap<[^,>]+,[^>]+>\\s+(\\w+)\\s*=/g, 'var $1 =');
-  result = result.replace(/\\bSet<[^>]+>\\s+(\\w+)\\s*=/g, 'var $1 =');
+  // List<T> x = [...] -> var x = [...]  (also handles List<T>?, Map<K,V>?, Set<T>?)
+  result = result.replace(/\\bList<[^>]+>\\??\\s+(\\w+)\\s*=/g, 'var $1 =');
+  result = result.replace(/\\bMap<[^,>]+,[^>]+>\\??\\s+(\\w+)\\s*=/g, 'var $1 =');
+  result = result.replace(/\\bSet<[^>]+>\\??\\s+(\\w+)\\s*=/g, 'var $1 =');
 
   // for (var x in items) -> for (var x of items)
   result = result.replace(/\\bfor\\s*\\(\\s*(var|final|int|String)\\s+(\\w+)\\s+in\\s+/g,
@@ -316,17 +371,48 @@ export class DartRunner extends BaseRunner {
     options: RunOptions
   ): Promise<RunResult> {
     return new Promise((resolve, _reject) => {
-      const handler = (e: MessageEvent) => {
+      let pendingStdout = '';
+
+      const handler = async (e: MessageEvent) => {
         if (e.source !== iframe.contentWindow) return;
-        if (e.data?.type !== 'clientbox-result' || e.data?.id !== id) return;
-        window.removeEventListener('message', handler);
-        resolve({
-          stdout: e.data.stdout || '',
-          stderr: e.data.stderr || '',
-          error: e.data.error || null,
-          exitCode: e.data.exitCode ?? 0,
-          duration: 0,
-        });
+        const data = e.data;
+        if (!data || data.id !== id) return;
+        if (data.type === 'clientbox-stdout') {
+          pendingStdout += data.chunk;
+          options.onStdout?.(data.chunk);
+          return;
+        }
+        if (data.type === 'clientbox-stderr') {
+          options.onStderr?.(data.chunk);
+          return;
+        }
+        if (data.type === 'clientbox-input-request') {
+          const promptText = pendingStdout || data.prompt || '';
+          pendingStdout = '';
+          let value: string | null = null;
+          if (options.onInput) {
+            try {
+              value = await options.onInput(promptText);
+            } catch {
+              value = null;
+            }
+          }
+          iframe.contentWindow!.postMessage(
+            { type: 'clientbox-input-response', id, value },
+            '*'
+          );
+          return;
+        }
+        if (data.type === 'clientbox-result') {
+          window.removeEventListener('message', handler);
+          resolve({
+            stdout: data.stdout || '',
+            stderr: data.stderr || '',
+            error: data.error || null,
+            exitCode: data.exitCode ?? 0,
+            duration: 0,
+          });
+        }
       };
 
       window.addEventListener('message', handler);

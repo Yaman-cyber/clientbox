@@ -4,6 +4,8 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>clientbox Playground</title>
+  <!-- Enable cross-origin isolation (SharedArrayBuffer) for interactive Python/Node input. -->
+  <script src="coi-serviceworker.js"></script>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -70,6 +72,9 @@
     .console-output .out { color: var(--green); }
     .console-output .err { color: var(--red); }
     .console-output .meta { color: var(--text-dimmer); }
+    .console-output .input-echo { color: #fbbf24; }
+    .console-output .inline-input { background: rgba(37,99,235,.12); border: 1px solid var(--accent); color: var(--text); font-family: inherit; font-size: inherit; line-height: 1.2; padding: 0 .3rem; outline: none; min-width: 200px; border-radius: 3px; }
+    .console-output .inline-input:focus { background: rgba(37,99,235,.22); }
     .preview-frame { width: 100%; height: 100%; border: none; background: #fff; display: none; }
 
     .modal-bg { display:none; position:fixed; inset:0; background:rgba(0,0,0,.55); z-index:200; align-items:center; justify-content:center; }
@@ -168,21 +173,21 @@ var RUNNER_ALIAS = { typescript: "node" };
 var EXAMPLES = {
   node: {
     files: {
-      "/index.js": "import { greet, farewell } from './utils.js';\n\nconsole.log(greet('World'));\nconsole.log(farewell('World'));\n\nconst items = [1, 2, 3, 4, 5];\nconsole.log('Sum:', items.reduce((a, b) => a + b, 0));",
-      "/utils.js": "export function greet(name) {\n  return 'Hello, ' + name + '!';\n}\n\nexport function farewell(name) {\n  return 'Goodbye, ' + name + '!';\n}"
+      "/index.js": "import { greet } from './utils.js';\n\n// prompt() is exposed by the Node runner — it blocks until onInput resolves.\n// Requires the host page to be cross-origin isolated (COOP/COEP).\nconst name = prompt('What is your name? ');\nconst age = prompt('How old are you? ');\nconsole.log(greet(name));\nconsole.log(`You are ${age} years old.`);",
+      "/utils.js": "export function greet(name) {\n  return 'Hello, ' + name + '!';\n}"
     },
     entryPoint: "/index.js"
   },
   typescript: {
     files: {
-      "/index.ts": "import { greet, sum } from './helpers';\n\ninterface User {\n  name: string;\n  age: number;\n}\n\nconst users: User[] = [\n  { name: 'Alice', age: 30 },\n  { name: 'Bob', age: 25 },\n  { name: 'Charlie', age: 35 },\n];\n\nusers.forEach((user: User) => {\n  console.log(greet(user.name));\n});\n\nconsole.log('\\n2 + 3 =', sum(2, 3));\nconsole.log('10 + 20 =', sum(10, 20));",
-      "/helpers.ts": "export function greet(name: string): string {\n  return 'Hello, ' + name + '!';\n}\n\nexport function sum(a: number, b: number): number {\n  return a + b;\n}"
+      "/index.ts": "import { greet } from './helpers';\n\ndeclare function prompt(message?: string): string;\n\nconst name: string = prompt('What is your name? ');\nconst age: string = prompt('How old are you? ');\nconsole.log(greet(name));\nconsole.log(`You are ${age} years old.`);",
+      "/helpers.ts": "export function greet(name: string): string {\n  return 'Hello, ' + name + '!';\n}"
     },
     entryPoint: "/index.ts"
   },
   python: {
     files: {
-      "/main.py": "import utils\n\nfor i in range(5):\n    print(f\"{i} squared is {utils.square(i)}\")\n\nprint(\"\\nFibonacci:\")\na, b = 0, 1\nfor _ in range(10):\n    print(a, end=\" \")\n    a, b = b, a + b\nprint()",
+      "/main.py": "import utils\n\nname = input(\"What is your name? \")\nage = input(\"How old are you? \")\nprint(f\"Hello, {name}! You are {age} years old.\\n\")\n\nprint(\"Fibonacci sequence:\")\na, b = 0, 1\nfor _ in range(10):\n    print(a, end=\" \")\n    a, b = b, a + b\nprint()\n\nprint(f\"\\n5 squared is {utils.square(5)}\")",
       "/utils.py": "def square(n):\n    return n * n"
     },
     entryPoint: "/main.py"
@@ -197,36 +202,36 @@ var EXAMPLES = {
   },
   csharp: {
     files: {
-      "/Program.cs": "using System;\n\nclass Program\n{\n    static void Main(string[] args)\n    {\n        Console.WriteLine(\"Hello from C#!\");\n\n        for (int i = 1; i <= 5; i++)\n        {\n            Console.WriteLine($\"{i}! = {MathHelper.Factorial(i)}\");\n        }\n\n        Console.WriteLine($\"Fibonacci(8) = {MathHelper.Fibonacci(8)}\");\n    }\n}",
-      "/MathHelper.cs": "using System;\n\nclass MathHelper\n{\n    public static int Factorial(int n)\n    {\n        if (n <= 1) return 1;\n        return n * Factorial(n - 1);\n    }\n\n    public static int Fibonacci(int n)\n    {\n        if (n <= 1) return n;\n        return Fibonacci(n - 1) + Fibonacci(n - 2);\n    }\n}"
+      "/Program.cs": "using System;\n\nclass Program\n{\n    static void Main(string[] args)\n    {\n        Console.Write(\"What is your name? \");\n        string name = Console.ReadLine();\n        Console.Write(\"How old are you? \");\n        string age = Console.ReadLine();\n        Console.WriteLine($\"Hello, {name}! You are {age} years old.\");\n        Console.WriteLine($\"5! = {MathHelper.Factorial(5)}\");\n    }\n}",
+      "/MathHelper.cs": "using System;\n\nclass MathHelper\n{\n    public static int Factorial(int n)\n    {\n        if (n <= 1) return 1;\n        return n * Factorial(n - 1);\n    }\n}"
     },
     entryPoint: "/Program.cs"
   },
   java: {
     files: {
-      "/Main.java": "public class Main {\n    public static void main(String[] args) {\n        System.out.println(\"Hello from Java!\");\n\n        for (int i = 1; i <= 5; i++) {\n            System.out.println(i + \"! = \" + MathUtils.factorial(i));\n        }\n\n        System.out.println(\"Fibonacci(8) = \" + MathUtils.fibonacci(8));\n    }\n}",
-      "/MathUtils.java": "public class MathUtils {\n    public static int factorial(int n) {\n        if (n <= 1) return 1;\n        return n * factorial(n - 1);\n    }\n\n    public static int fibonacci(int n) {\n        if (n <= 1) return n;\n        return fibonacci(n - 1) + fibonacci(n - 2);\n    }\n}"
+      "/Main.java": "import java.util.Scanner;\n\npublic class Main {\n    public static void main(String[] args) {\n        Scanner sc = new Scanner(System.in);\n        System.out.print(\"What is your name? \");\n        String name = sc.nextLine();\n        System.out.print(\"How old are you? \");\n        String age = sc.nextLine();\n        System.out.println(\"Hello, \" + name + \"! You are \" + age + \" years old.\");\n        System.out.println(\"5! = \" + MathUtils.factorial(5));\n    }\n}",
+      "/MathUtils.java": "public class MathUtils {\n    public static int factorial(int n) {\n        if (n <= 1) return 1;\n        return n * factorial(n - 1);\n    }\n}"
     },
     entryPoint: "/Main.java"
   },
   php: {
     files: {
-      "/index.php": "<?php\nrequire_once 'helpers.php';\n\necho \"Hello from PHP!\\n\";\n\nfor ($i = 1; $i <= 5; $i++) {\n    echo \"Factorial of $i = \" . factorial($i) . \"\\n\";\n}\n\necho \"Fibonacci(8) = \" . fibonacci(8) . \"\\n\";\n\n$fruits = [\"apple\", \"banana\", \"cherry\"];\nforeach ($fruits as $index => $fruit) {\n    echo ($index + 1) . \". \" . ucfirst($fruit) . \"\\n\";\n}\n?>",
-      "/helpers.php": "<?php\nfunction factorial($n) {\n    if ($n <= 1) return 1;\n    return $n * factorial($n - 1);\n}\n\nfunction fibonacci($n) {\n    if ($n <= 1) return $n;\n    return fibonacci($n - 1) + fibonacci($n - 2);\n}\n?>"
+      "/index.php": "<?php\nrequire_once 'helpers.php';\n\necho \"What is your name? \";\n$name = readline();\necho \"How old are you? \";\n$age = readline();\necho \"Hello, $name! You are $age years old.\\n\";\necho \"5! = \" . factorial(5) . \"\\n\";\n?>",
+      "/helpers.php": "<?php\nfunction factorial($n) {\n    if ($n <= 1) return 1;\n    return $n * factorial($n - 1);\n}\n?>"
     },
     entryPoint: "/index.php"
   },
   go: {
     files: {
-      "/main.go": "package main\n\nimport (\n\t\"fmt\"\n)\n\nfunc main() {\n\tfmt.Println(\"Hello from Go!\")\n\n\tfor i := 1; i <= 5; i++ {\n\t\tfmt.Printf(\"%d! = %d\\n\", i, factorial(i))\n\t}\n\n\tfmt.Printf(\"Fibonacci(8) = %d\\n\", fibonacci(8))\n\n\tfruits := []string{\"apple\", \"banana\", \"cherry\"}\n\tfor i, fruit := range fruits {\n\t\tfmt.Printf(\"%d. %s\\n\", i+1, fruit)\n\t}\n}",
-      "/mathutils.go": "package main\n\nfunc factorial(n int) int {\n\tif n <= 1 {\n\t\treturn 1\n\t}\n\treturn n * factorial(n-1)\n}\n\nfunc fibonacci(n int) int {\n\tif n <= 1 {\n\t\treturn n\n\t}\n\treturn fibonacci(n-1) + fibonacci(n-2)\n}"
+      "/main.go": "package main\n\nimport (\n\t\"bufio\"\n\t\"fmt\"\n\t\"os\"\n\t\"strings\"\n)\n\nfunc main() {\n\treader := bufio.NewReader(os.Stdin)\n\tfmt.Print(\"What is your name? \")\n\tname, _ := reader.ReadString('\\n')\n\tname = strings.TrimSpace(name)\n\tfmt.Print(\"How old are you? \")\n\tage, _ := reader.ReadString('\\n')\n\tage = strings.TrimSpace(age)\n\tfmt.Printf(\"Hello, %s! You are %s years old.\\n\", name, age)\n\tfmt.Printf(\"5! = %d\\n\", factorial(5))\n}",
+      "/mathutils.go": "package main\n\nfunc factorial(n int) int {\n\tif n <= 1 {\n\t\treturn 1\n\t}\n\treturn n * factorial(n-1)\n}"
     },
     entryPoint: "/main.go"
   },
   dart: {
     files: {
-      "/main.dart": "void main() {\n  print('Hello from Dart!');\n\n  for (int i = 1; i <= 5; i++) {\n    print('$i! = ${factorial(i)}');\n  }\n\n  print('Fibonacci(8) = ${fibonacci(8)}');\n\n  var fruits = ['apple', 'banana', 'cherry'];\n  for (var i = 0; i < fruits.length; i++) {\n    print('${i + 1}. ${fruits[i][0].toUpperCase()}${fruits[i].substring(1)}');\n  }\n}",
-      "/mathutils.dart": "int factorial(int n) {\n  if (n <= 1) return 1;\n  return n * factorial(n - 1);\n}\n\nint fibonacci(int n) {\n  if (n <= 1) return n;\n  return fibonacci(n - 1) + fibonacci(n - 2);\n}"
+      "/main.dart": "import 'dart:io';\n\nvoid main() {\n  stdout.write('What is your name? ');\n  String? name = stdin.readLineSync();\n  stdout.write('How old are you? ');\n  String? age = stdin.readLineSync();\n  print('Hello, $name! You are $age years old.');\n  print('5! = ${factorial(5)}');\n}",
+      "/mathutils.dart": "int factorial(int n) {\n  if (n <= 1) return 1;\n  return n * factorial(n - 1);\n}"
     },
     entryPoint: "/main.dart"
   }
@@ -531,18 +536,64 @@ async function runCode() {
   btn.disabled = true;
   showLoading("Initializing runtime...", "This may take a moment for the first run");
 
+  var consoleCleared = false;
+  function ensureConsoleClear() {
+    if (consoleCleared) return;
+    conOut.innerHTML = "";
+    consoleCleared = true;
+  }
+  function appendText(text, cls) {
+    ensureConsoleClear();
+    var span = document.createElement("span");
+    if (cls) span.className = cls;
+    span.textContent = text;
+    conOut.appendChild(span);
+    conOut.scrollTop = conOut.scrollHeight;
+  }
+  function requestInputUI() {
+    return new Promise(function(resolve) {
+      ensureConsoleClear();
+      var input = document.createElement("input");
+      input.className = "inline-input";
+      input.autocomplete = "off";
+      input.spellcheck = false;
+      conOut.appendChild(input);
+      input.focus();
+      conOut.scrollTop = conOut.scrollHeight;
+      input.addEventListener("keydown", function(e) {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          var val = input.value;
+          var echo = document.createElement("span");
+          echo.className = "input-echo";
+          echo.textContent = val + "\n";
+          input.replaceWith(echo);
+          conOut.scrollTop = conOut.scrollHeight;
+          resolve(val);
+        }
+      });
+    });
+  }
+
   try {
     var files = {};
     for (var k in fileContents[currentLang]) files[k] = fileContents[currentLang][k];
     var ep = entryPoints[currentLang];
     var runnerLang = RUNNER_ALIAS[currentLang] || currentLang;
-    var result = await box.run(runnerLang, { files: files, entryPoint: ep });
+    var result = await box.run(runnerLang, {
+      files: files,
+      entryPoint: ep,
+      onStdout: function(chunk) { appendText(chunk, "out"); },
+      onStderr: function(chunk) { appendText(chunk, "err"); },
+      onInput: requestInputUI
+    });
 
-    var h = "";
-    if (result.stdout) h += '<span class="out">' + esc(result.stdout) + "</span>\n";
-    if (result.stderr) h += '<span class="err">' + esc(result.stderr) + "</span>\n";
-    h += '<span class="meta">\n--- exit: ' + result.exitCode + " | " + result.duration + "ms ---</span>";
-    conOut.innerHTML = h;
+    // Web runner doesn't stream — fall back to printing the full result.
+    if (!consoleCleared) {
+      if (result.stdout) appendText(result.stdout, "out");
+      if (result.stderr) appendText(result.stderr, "err");
+    }
+    appendText("\n--- exit: " + result.exitCode + " | " + result.duration + "ms ---", "meta");
 
     if (currentLang === "web") {
       var inlined = buildInlinedPreview(files, ep);
@@ -550,7 +601,7 @@ async function runCode() {
       if (activeOutputTab !== "preview") { activeOutputTab = "preview"; renderOutputTabs(); }
     }
   } catch (e) {
-    conOut.innerHTML = '<span class="err">' + esc(e.message || String(e)) + "</span>";
+    appendText(e.message || String(e), "err");
   }
 
   isRunning = false;
@@ -657,10 +708,10 @@ require(["vs/editor/editor.main"], function() {
       onStatusChange: function(e) {
         document.getElementById("statusText").textContent =
           "[" + e.language + "] " + e.status + (e.message ? " \u2014 " + e.message : "");
+        // Only show the loading overlay while the runtime is downloading/initializing.
+        // Once execution starts, streamed stdout/stderr take over the console.
         if (isRunning && e.status === "loading") {
           showLoading(e.message || "Loading runtime...", "This may take a moment for the first run");
-        } else if (isRunning && e.status === "running") {
-          document.getElementById("consoleOutput").innerHTML = '<div class="loading-overlay"><div class="loading-spinner"></div><div class="loading-msg">Executing...</div></div>';
         }
       }
     });

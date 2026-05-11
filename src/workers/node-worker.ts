@@ -1,6 +1,9 @@
 export const NODE_WORKER_SOURCE = /* js */ `
 'use strict';
 
+var CTRL_INTS = 2;
+var CTRL_BYTES = CTRL_INTS * 4;
+
 self.onmessage = function(e) {
   var msg = e.data;
   if (msg.type !== 'run') return;
@@ -11,6 +14,50 @@ self.onmessage = function(e) {
   var stderr = [];
   var exitCode = 0;
   var error = null;
+
+  var sab = msg.sab || null;
+  var ctrl = sab ? new Int32Array(sab, 0, CTRL_INTS) : null;
+  var dataView = sab ? new Uint8Array(sab, CTRL_BYTES) : null;
+  var stdinLines = msg.stdin ? msg.stdin.split('\\n') : [];
+  var stdinIndex = 0;
+
+  function emitStdoutLine(line) {
+    stdout.push(line);
+    self.postMessage({ id: msg.id, type: 'stdout', chunk: line + '\\n' });
+  }
+  function emitStdoutRaw(text) {
+    stdout.push(text);
+    self.postMessage({ id: msg.id, type: 'stdout', chunk: text });
+  }
+  function emitStderrLine(line) {
+    stderr.push(line);
+    self.postMessage({ id: msg.id, type: 'stderr', chunk: line + '\\n' });
+  }
+
+  // Synchronous prompt() — exposed as a global to user JS code.
+  // Drains pre-supplied stdin first, then blocks via Atomics on the SAB
+  // while the main thread fetches input from onInput.
+  function syncPrompt(promptText) {
+    if (promptText !== undefined && promptText !== null && promptText !== '') {
+      emitStdoutRaw(String(promptText));
+    }
+    if (stdinIndex < stdinLines.length) {
+      var line = stdinLines[stdinIndex++];
+      if (line === '' && stdinIndex === stdinLines.length) return null;
+      return line;
+    }
+    if (!sab) return null;
+    Atomics.store(ctrl, 0, 0);
+    Atomics.store(ctrl, 1, 0);
+    self.postMessage({ id: msg.id, type: 'input-request' });
+    Atomics.wait(ctrl, 0, 0);
+    var status = Atomics.load(ctrl, 0);
+    if (status === 2) return null;
+    var len = Atomics.load(ctrl, 1);
+    if (len <= 0) return '';
+    var bytes = dataView.slice(0, len);
+    return new TextDecoder().decode(bytes);
+  }
 
   function normalizePath(from, to) {
     if (to.startsWith('/')) return to;
@@ -128,7 +175,7 @@ self.onmessage = function(e) {
       code = esmToCjs(code);
 
       var wrappedFn = new Function(
-        'module', 'exports', 'require', '__filename', '__dirname', 'console',
+        'module', 'exports', 'require', '__filename', '__dirname', 'console', 'prompt',
         code
       );
       wrappedFn(
@@ -137,33 +184,34 @@ self.onmessage = function(e) {
         createRequire(resolvedPath),
         resolvedPath,
         resolvedPath.substring(0, resolvedPath.lastIndexOf('/')),
-        fakeConsole
+        fakeConsole,
+        syncPrompt
       );
       return moduleObj.exports;
     };
   }
 
   var fakeConsole = {
-    log: function()   { stdout.push(argsToString(arguments)); },
-    info: function()  { stdout.push(argsToString(arguments)); },
-    warn: function()  { stderr.push(argsToString(arguments)); },
-    error: function() { stderr.push(argsToString(arguments)); },
-    debug: function() { stdout.push(argsToString(arguments)); },
-    dir: function(o)  { stdout.push(typeof o === 'object' ? JSON.stringify(o, null, 2) : String(o)); },
+    log: function()   { emitStdoutLine(argsToString(arguments)); },
+    info: function()  { emitStdoutLine(argsToString(arguments)); },
+    warn: function()  { emitStderrLine(argsToString(arguments)); },
+    error: function() { emitStderrLine(argsToString(arguments)); },
+    debug: function() { emitStdoutLine(argsToString(arguments)); },
+    dir: function(o)  { emitStdoutLine(typeof o === 'object' ? JSON.stringify(o, null, 2) : String(o)); },
     clear: function() {},
     time: function() {},
     timeEnd: function() {},
     timeLog: function() {},
-    trace: function() { stdout.push(new Error().stack || 'Trace'); },
+    trace: function() { emitStdoutLine(new Error().stack || 'Trace'); },
     assert: function(cond) {
       if (!cond) {
         var msg = arguments.length > 1
           ? argsToString(Array.prototype.slice.call(arguments, 1))
           : 'Assertion failed';
-        stderr.push(msg);
+        emitStderrLine(msg);
       }
     },
-    table: function(data) { stdout.push(JSON.stringify(data, null, 2)); }
+    table: function(data) { emitStdoutLine(JSON.stringify(data, null, 2)); }
   };
 
   function isTS(path) {
@@ -463,7 +511,7 @@ self.onmessage = function(e) {
     entryCode = esmToCjs(entryCode);
 
     var wrapFn = new Function(
-      'module', 'exports', 'require', '__filename', '__dirname', 'console',
+      'module', 'exports', 'require', '__filename', '__dirname', 'console', 'prompt',
       entryCode
     );
     var mod = { exports: {} };
@@ -474,7 +522,8 @@ self.onmessage = function(e) {
       createRequire(entryPoint),
       entryPoint,
       entryPoint.substring(0, entryPoint.lastIndexOf('/')),
-      fakeConsole
+      fakeConsole,
+      syncPrompt
     );
   } catch(err) {
     exitCode = 1;

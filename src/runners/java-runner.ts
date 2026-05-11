@@ -17,16 +17,36 @@ function buildJavaHarness(cheerpjCdnUrl: string): string {
 
 let cjReady = false;
 let pendingMessages = [];
+let pendingInput = null;
+let currentRunId = null;
 
 window.addEventListener('message', function(e) {
-  if (e.data && e.data.type === 'clientbox-run') {
+  if (!e.data) return;
+  if (e.data.type === 'clientbox-run') {
     if (cjReady) {
       handleRun(e.data);
     } else {
       pendingMessages.push(e.data);
     }
+    return;
+  }
+  if (e.data.type === 'clientbox-input-response' && pendingInput && e.data.id === pendingInput.id) {
+    var resolver = pendingInput.resolve;
+    pendingInput = null;
+    resolver(e.data.value);
   }
 });
+
+function requestInput(promptText) {
+  return new Promise(function(resolve) {
+    pendingInput = { id: currentRunId, resolve: resolve };
+    parent.postMessage({
+      type: 'clientbox-input-request',
+      id: currentRunId,
+      prompt: promptText || ''
+    }, '*');
+  });
+}
 
 async function initCheerpJ() {
   var timedOut = false;
@@ -70,6 +90,24 @@ async function handleRun(msg) {
   var stderr = [];
   var error = null;
   var exitCode = 0;
+  currentRunId = msg.id;
+
+  var stdinLines = msg.stdin ? msg.stdin.split('\\n') : [];
+  var stdinIndex = 0;
+
+  function emitStdout(text) {
+    stdout.push(text);
+    parent.postMessage({ type: 'clientbox-stdout', id: msg.id, chunk: text }, '*');
+  }
+
+  async function readLineAsync() {
+    if (stdinIndex < stdinLines.length) {
+      var line = stdinLines[stdinIndex++];
+      if (line === '' && stdinIndex === stdinLines.length) return null;
+      return line;
+    }
+    return await requestInput('');
+  }
 
   try {
     var files = msg.files || {};
@@ -77,21 +115,11 @@ async function handleRun(msg) {
     var code = files[entryPoint];
     if (!code) throw new Error('Entry point not found: ' + entryPoint);
 
-    // Try CheerpJ-based execution first
-    if (typeof cheerpjRunLibrary === 'function') {
-      var result = await executeWithCheerpJ(files, entryPoint);
-      stdout = result.stdout;
-      stderr = result.stderr;
-      error = result.error;
-      exitCode = result.exitCode;
-    } else {
-      // Fallback: lightweight transpilation for basic Java programs
-      var result = executeWithTranspiler(files, entryPoint);
-      stdout = result.stdout;
-      stderr = result.stderr;
-      error = result.error;
-      exitCode = result.exitCode;
-    }
+    // CheerpJ path doesn't support our interactive input model; use transpiler for both.
+    var result = await executeWithTranspiler(files, entryPoint, emitStdout, readLineAsync);
+    stderr = result.stderr;
+    error = result.error;
+    exitCode = result.exitCode;
   } catch(err) {
     exitCode = 1;
     error = err.message || String(err);
@@ -101,7 +129,7 @@ async function handleRun(msg) {
   parent.postMessage({
     type: 'clientbox-result',
     id: msg.id,
-    stdout: stdout.join('\\n'),
+    stdout: stdout.join(''),
     stderr: stderr.join('\\n'),
     error: error,
     exitCode: exitCode
@@ -154,8 +182,7 @@ async function executeWithCheerpJ(files, entryPoint) {
   return { stdout: stdout, stderr: stderr, error: error, exitCode: exitCode };
 }
 
-function executeWithTranspiler(files, entryPoint) {
-  var stdout = [];
+async function executeWithTranspiler(files, entryPoint, emitStdout, readLineAsync) {
   var stderr = [];
   var error = null;
   var exitCode = 0;
@@ -176,7 +203,7 @@ function executeWithTranspiler(files, entryPoint) {
             parts.push(arguments[i] === null ? 'null' :
                        arguments[i] === undefined ? '' : String(arguments[i]));
           }
-          stdout.push(parts.join(' '));
+          emitStdout(parts.join(' ') + '\\n');
         },
         print: function() {
           var parts = [];
@@ -184,7 +211,7 @@ function executeWithTranspiler(files, entryPoint) {
             parts.push(arguments[i] === null ? 'null' :
                        arguments[i] === undefined ? '' : String(arguments[i]));
           }
-          stdout.push(parts.join(' '));
+          emitStdout(parts.join(' '));
         },
         printf: function(fmt) {
           var args = Array.prototype.slice.call(arguments, 1);
@@ -194,8 +221,9 @@ function executeWithTranspiler(files, entryPoint) {
             if (idx >= args.length) return m;
             return String(args[idx++]);
           });
-          stdout.push(result);
-        }
+          emitStdout(result);
+        },
+        in: 'STDIN'
       },
       err: {
         println: function(msg) { stderr.push(String(msg)); },
@@ -203,8 +231,24 @@ function executeWithTranspiler(files, entryPoint) {
       }
     };
 
-    var fn = new Function('System', 'Math', 'Integer', 'Double', 'String', jsCode);
-    fn(fakeSystem, Math, {
+    var Scanner = {
+      nextLine: async function() { return await readLineAsync(); },
+      nextInt: async function() {
+        var line = await readLineAsync();
+        return parseInt(line, 10);
+      },
+      nextDouble: async function() {
+        var line = await readLineAsync();
+        return parseFloat(line);
+      },
+      hasNext: function() { return true; },
+      hasNextLine: function() { return true; },
+      close: function() {}
+    };
+
+    var AsyncFunction = Object.getPrototypeOf(async function(){}).constructor;
+    var fn = new AsyncFunction('System', 'Math', 'Integer', 'Double', 'String', 'Scanner', jsCode);
+    await fn(fakeSystem, Math, {
       parseInt: function(s) { return parseInt(s, 10); },
       valueOf: function(v) { return v; },
       MAX_VALUE: 2147483647,
@@ -224,14 +268,14 @@ function executeWithTranspiler(files, entryPoint) {
           return String(args[idx++]);
         });
       }
-    });
+    }, Scanner);
   } catch(e) {
     exitCode = 1;
     error = e.message || String(e);
     stderr.push(error);
   }
 
-  return { stdout: stdout, stderr: stderr, error: error, exitCode: exitCode };
+  return { stderr: stderr, error: error, exitCode: exitCode };
 }
 
 function javaExtractBraceBlock(src, openIdx) {
@@ -286,8 +330,10 @@ function transpileJavaToJS(allCode, entryCode) {
   var output = '';
 
   for (var m = 0; m < methods.length; m++) {
-    output += 'function ' + methods[m].name + '(' + methods[m].params + ') {\\n';
-    output += transformJavaBody(methods[m].body);
+    var transformedBody = transformJavaBody(methods[m].body);
+    var needsAsync = transformedBody.indexOf('await ') !== -1;
+    output += (needsAsync ? 'async ' : '') + 'function ' + methods[m].name + '(' + methods[m].params + ') {\\n';
+    output += transformedBody;
     output += '\\n}\\n\\n';
   }
 
@@ -315,6 +361,15 @@ function transpileJavaToJS(allCode, entryCode) {
 
 function transformJavaBody(body) {
   var result = body;
+
+  // Scanner declarations: Scanner sc = new Scanner(System.in); -> var sc = Scanner;
+  result = result.replace(/\\bScanner\\s+(\\w+)\\s*=\\s*new\\s+Scanner\\s*\\([^)]*\\)/g, 'var $1 = Scanner');
+  result = result.replace(/\\bScanner\\s+(\\w+)\\s*;/g, 'var $1 = Scanner;');
+
+  // Wrap blocking Scanner method calls with await. These take no args, so the regex is safe.
+  result = result.replace(/\\b(\\w+)\\.nextLine\\s*\\(\\s*\\)/g, '(await $1.nextLine())');
+  result = result.replace(/\\b(\\w+)\\.nextInt\\s*\\(\\s*\\)/g, '(await $1.nextInt())');
+  result = result.replace(/\\b(\\w+)\\.nextDouble\\s*\\(\\s*\\)/g, '(await $1.nextDouble())');
 
   // Type declarations: int x = 5; -> var x = 5;
   result = result.replace(
@@ -463,17 +518,48 @@ export class JavaRunner extends BaseRunner {
     options: RunOptions
   ): Promise<RunResult> {
     return new Promise((resolve, _reject) => {
-      const handler = (e: MessageEvent) => {
+      let pendingStdout = '';
+
+      const handler = async (e: MessageEvent) => {
         if (e.source !== iframe.contentWindow) return;
-        if (e.data?.type !== 'clientbox-result' || e.data?.id !== id) return;
-        window.removeEventListener('message', handler);
-        resolve({
-          stdout: e.data.stdout || '',
-          stderr: e.data.stderr || '',
-          error: e.data.error || null,
-          exitCode: e.data.exitCode ?? 0,
-          duration: 0,
-        });
+        const data = e.data;
+        if (!data || data.id !== id) return;
+        if (data.type === 'clientbox-stdout') {
+          pendingStdout += data.chunk;
+          options.onStdout?.(data.chunk);
+          return;
+        }
+        if (data.type === 'clientbox-stderr') {
+          options.onStderr?.(data.chunk);
+          return;
+        }
+        if (data.type === 'clientbox-input-request') {
+          const promptText = pendingStdout || data.prompt || '';
+          pendingStdout = '';
+          let value: string | null = null;
+          if (options.onInput) {
+            try {
+              value = await options.onInput(promptText);
+            } catch {
+              value = null;
+            }
+          }
+          iframe.contentWindow!.postMessage(
+            { type: 'clientbox-input-response', id, value },
+            '*'
+          );
+          return;
+        }
+        if (data.type === 'clientbox-result') {
+          window.removeEventListener('message', handler);
+          resolve({
+            stdout: data.stdout || '',
+            stderr: data.stderr || '',
+            error: data.error || null,
+            exitCode: data.exitCode ?? 0,
+            duration: 0,
+          });
+        }
       };
 
       window.addEventListener('message', handler);

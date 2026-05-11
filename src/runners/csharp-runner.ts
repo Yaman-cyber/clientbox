@@ -31,22 +31,60 @@ const CORE_ASSEMBLIES = [
 
 let runtimeReady = false;
 let pendingMessages = [];
+let pendingInput = null;
+let currentRunId = null;
 
 window.addEventListener('message', function(e) {
-  if (e.data && e.data.type === 'clientbox-run') {
+  if (!e.data) return;
+  if (e.data.type === 'clientbox-run') {
     if (runtimeReady) {
       handleRun(e.data);
     } else {
       pendingMessages.push(e.data);
     }
+    return;
+  }
+  if (e.data.type === 'clientbox-input-response' && pendingInput && e.data.id === pendingInput.id) {
+    var resolver = pendingInput.resolve;
+    pendingInput = null;
+    resolver(e.data.value);
   }
 });
+
+function requestInput(promptText) {
+  return new Promise(function(resolve) {
+    pendingInput = { id: currentRunId, resolve: resolve };
+    parent.postMessage({
+      type: 'clientbox-input-request',
+      id: currentRunId,
+      prompt: promptText || ''
+    }, '*');
+  });
+}
 
 async function handleRun(msg) {
   var stdout = [];
   var stderr = [];
   var error = null;
   var exitCode = 0;
+  currentRunId = msg.id;
+
+  var stdinLines = msg.stdin ? msg.stdin.split('\\n') : [];
+  var stdinIndex = 0;
+
+  function emitStdout(text) {
+    stdout.push(text);
+    parent.postMessage({ type: 'clientbox-stdout', id: msg.id, chunk: text }, '*');
+  }
+
+  async function readLineAsync() {
+    if (stdinIndex < stdinLines.length) {
+      var line = stdinLines[stdinIndex++];
+      if (line === '' && stdinIndex === stdinLines.length) return null;
+      return line;
+    }
+    return await requestInput('');
+  }
 
   try {
     var files = msg.files || {};
@@ -54,12 +92,8 @@ async function handleRun(msg) {
     var code = files[entryPoint];
     if (!code) throw new Error('Entry point not found: ' + entryPoint);
 
-    // Combine all C# files into a single compilation unit
     var allCode = Object.keys(files).map(function(k) { return files[k]; }).join('\\n');
-
-    // Compile and run via the .NET WASM runtime
-    var result = await compileAndRun(allCode);
-    stdout = result.stdout;
+    var result = await compileAndRun(allCode, emitStdout, readLineAsync);
     stderr = result.stderr;
     if (result.error) {
       error = result.error;
@@ -74,34 +108,20 @@ async function handleRun(msg) {
   parent.postMessage({
     type: 'clientbox-result',
     id: msg.id,
-    stdout: stdout.join('\\n'),
+    stdout: stdout.join(''),
     stderr: stderr.join('\\n'),
     error: error,
     exitCode: exitCode
   }, '*');
 }
 
-async function compileAndRun(code) {
-  // Fallback: compile-and-execute via eval of transpiled output
-  // This is a lightweight approach that handles basic C# patterns
-  var stdout = [];
+async function compileAndRun(code, emitStdout, readLineAsync) {
   var stderr = [];
   var error = null;
 
   try {
     var jsCode = transpileCSharpToJS(code);
-    var fakeConsole = {
-      log: function() {
-        var parts = [];
-        for (var i = 0; i < arguments.length; i++) {
-          parts.push(arguments[i] === null ? 'null' :
-                     arguments[i] === undefined ? '' : String(arguments[i]));
-        }
-        stdout.push(parts.join(' '));
-      }
-    };
-    var fn = new Function('Console', 'Math', jsCode);
-    fn({
+    var Console = {
       WriteLine: function() {
         var parts = [];
         for (var i = 0; i < arguments.length; i++) {
@@ -109,14 +129,13 @@ async function compileAndRun(code) {
                      arguments[i] === undefined ? '' : String(arguments[i]));
         }
         var line = parts.join(' ');
-        // Handle C# string format: Console.WriteLine("{0} {1}", a, b)
         if (arguments.length > 1 && typeof arguments[0] === 'string') {
           line = arguments[0].replace(/\\{(\\d+)\\}/g, function(_, idx) {
             var i = parseInt(idx) + 1;
             return i < arguments.length ? String(arguments[i]) : '{' + idx + '}';
           }.bind(null, arguments));
         }
-        stdout.push(line);
+        emitStdout(line + '\\n');
       },
       Write: function() {
         var parts = [];
@@ -124,16 +143,21 @@ async function compileAndRun(code) {
           parts.push(arguments[i] === null ? 'null' :
                      arguments[i] === undefined ? '' : String(arguments[i]));
         }
-        stdout.push(parts.join(' '));
+        emitStdout(parts.join(' '));
       },
-      ReadLine: function() { return ''; }
-    }, Math);
+      ReadLine: async function() {
+        return await readLineAsync();
+      }
+    };
+    var AsyncFunction = Object.getPrototypeOf(async function(){}).constructor;
+    var fn = new AsyncFunction('Console', 'Math', jsCode);
+    await fn(Console, Math);
   } catch(e) {
     error = e.message || String(e);
     stderr.push(error);
   }
 
-  return { stdout: stdout, stderr: stderr, error: error };
+  return { stderr: stderr, error: error };
 }
 
 function extractBraceBlock(src, openIdx) {
@@ -190,10 +214,12 @@ function transpileCSharpToJS(code) {
 
   var output = '';
 
-  // Emit helper functions first
+  // Emit helper functions first. Mark async if the body uses await (i.e. reads input).
   for (var m = 0; m < methods.length; m++) {
-    output += 'function ' + methods[m].name + '(' + methods[m].params + ') {\\n';
-    output += transformCSharpBody(methods[m].body);
+    var transformedBody = transformCSharpBody(methods[m].body);
+    var needsAsync = transformedBody.indexOf('await ') !== -1;
+    output += (needsAsync ? 'async ' : '') + 'function ' + methods[m].name + '(' + methods[m].params + ') {\\n';
+    output += transformedBody;
     output += '\\n}\\n\\n';
   }
 
@@ -220,11 +246,48 @@ function transpileCSharpToJS(code) {
   return output;
 }
 
+// Wraps balanced fn(...) calls as (await fn(...)) for any matching dotted name.
+function wrapAwaitCalls(src, names) {
+  for (var ni = 0; ni < names.length; ni++) {
+    var name = names[ni];
+    var result = '';
+    var i = 0;
+    while (i < src.length) {
+      var charBefore = i === 0 ? '' : src[i - 1];
+      var prevOk = i === 0 || /[^a-zA-Z0-9_$.]/.test(charBefore);
+      if (prevOk && src.substr(i, name.length) === name) {
+        var j = i + name.length;
+        while (j < src.length && (src[j] === ' ' || src[j] === '\\t')) j++;
+        if (src[j] === '(') {
+          var depth = 1;
+          var k = j + 1;
+          while (k < src.length && depth > 0) {
+            if (src[k] === '(') depth++;
+            else if (src[k] === ')') depth--;
+            if (depth > 0) k++;
+          }
+          if (depth === 0) {
+            result += '(await ' + src.substring(i, k + 1) + ')';
+            i = k + 1;
+            continue;
+          }
+        }
+      }
+      result += src[i++];
+    }
+    src = result;
+  }
+  return src;
+}
+
 function transformCSharpBody(body) {
   var result = body;
 
   // Console.WriteLine -> Console.WriteLine (already mapped)
   result = result.replace(/System\\.Console\\./g, 'Console.');
+
+  // Console.ReadLine() returns a Promise — wrap in await.
+  result = wrapAwaitCalls(result, ['Console.ReadLine']);
 
   // Variable declarations: int x = 5; -> var x = 5;
   result = result.replace(
@@ -367,17 +430,48 @@ export class CSharpRunner extends BaseRunner {
     options: RunOptions
   ): Promise<RunResult> {
     return new Promise((resolve, _reject) => {
-      const handler = (e: MessageEvent) => {
+      let pendingStdout = '';
+
+      const handler = async (e: MessageEvent) => {
         if (e.source !== iframe.contentWindow) return;
-        if (e.data?.type !== 'clientbox-result' || e.data?.id !== id) return;
-        window.removeEventListener('message', handler);
-        resolve({
-          stdout: e.data.stdout || '',
-          stderr: e.data.stderr || '',
-          error: e.data.error || null,
-          exitCode: e.data.exitCode ?? 0,
-          duration: 0,
-        });
+        const data = e.data;
+        if (!data || data.id !== id) return;
+        if (data.type === 'clientbox-stdout') {
+          pendingStdout += data.chunk;
+          options.onStdout?.(data.chunk);
+          return;
+        }
+        if (data.type === 'clientbox-stderr') {
+          options.onStderr?.(data.chunk);
+          return;
+        }
+        if (data.type === 'clientbox-input-request') {
+          const promptText = pendingStdout || data.prompt || '';
+          pendingStdout = '';
+          let value: string | null = null;
+          if (options.onInput) {
+            try {
+              value = await options.onInput(promptText);
+            } catch {
+              value = null;
+            }
+          }
+          iframe.contentWindow!.postMessage(
+            { type: 'clientbox-input-response', id, value },
+            '*'
+          );
+          return;
+        }
+        if (data.type === 'clientbox-result') {
+          window.removeEventListener('message', handler);
+          resolve({
+            stdout: data.stdout || '',
+            stderr: data.stderr || '',
+            error: data.error || null,
+            exitCode: data.exitCode ?? 0,
+            duration: 0,
+          });
+        }
       };
 
       window.addEventListener('message', handler);

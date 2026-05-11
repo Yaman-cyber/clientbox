@@ -267,6 +267,105 @@ func factorial(n int) int {
 // stdout: "1! = 1\n2! = 2\n3! = 6\n4! = 24\n5! = 120"
 ```
 
+## Interactive input
+
+User code can request input at runtime (e.g. Python's `input()`, C#'s `Console.ReadLine()`, Java's `Scanner`). Pass an `onInput` callback to `run()` and the runner will pause execution until you return a value. Pair it with `onStdout` / `onStderr` so the prompt text actually streams to your UI **before** the program blocks on input.
+
+### Minimal example
+
+```ts
+const result = await box.run("python", {
+  files: {
+    "/main.py": `
+name = input("What is your name? ")
+print(f"Hello, {name}!")
+    `,
+  },
+  entryPoint: "/main.py",
+  onStdout: (chunk) => process.stdout.write(chunk), // or terminal.write(chunk) in browser
+  onStderr: (chunk) => process.stderr.write(chunk),
+  onInput: (prompt) => window.prompt(prompt) ?? null, // return null to signal EOF
+});
+```
+
+`onInput` is invoked with the stdout produced since the last input request, which is typically the prompt text the program just wrote. Return a string (no trailing newline needed) or `null` for EOF.
+
+### Pre-supplied stdin
+
+You can still pre-feed input as a string. Pre-supplied lines are consumed first; `onInput` is only called once the pre-supplied input is exhausted.
+
+```ts
+await box.run("python", {
+  files: { "/main.py": "a = input(); b = input(); print(int(a) + int(b))" },
+  entryPoint: "/main.py",
+  stdin: "2\n3", // both inputs supplied — onInput never fires
+});
+```
+
+### Streaming output without input
+
+`onStdout` / `onStderr` work independently. Use them to render output as the program produces it, instead of waiting for the final aggregated `result.stdout`:
+
+```ts
+await box.run("python", {
+  files: {
+    "/main.py":
+      "import time\nfor i in range(5):\n    print(i); time.sleep(0.2)",
+  },
+  entryPoint: "/main.py",
+  onStdout: (chunk) => appendToTerminal(chunk),
+});
+```
+
+### Language-specific input calls
+
+The host-facing API is the same for every language — only the user code differs:
+
+| Language | What the user code calls                                                        |
+| -------- | ------------------------------------------------------------------------------- |
+| Python   | `input(prompt)`                                                                 |
+| Node/TS  | `prompt(message)` (exposed as a global by the Node runner)                      |
+| C#       | `Console.ReadLine()`                                                            |
+| Java     | `new Scanner(System.in).nextLine()` / `nextInt()` / `nextDouble()`              |
+| PHP      | `readline($prompt)` or `fgets(STDIN)`                                           |
+| Dart     | `stdin.readLineSync()`                                                          |
+| Go       | `bufio.NewReader(os.Stdin).ReadString('\n')`, `fmt.Scanln(&x)`                  |
+| Web      | `window.prompt()` works natively inside the iframe — no `onInput` wiring needed |
+
+### Cross-origin isolation requirement (Python & Node only)
+
+Python and Node make input look synchronous to user code by blocking the runtime's Web Worker on a `SharedArrayBuffer`. Browsers only expose `SharedArrayBuffer` when the host page is **cross-origin isolated**. Serve the page with these response headers:
+
+```
+Cross-Origin-Opener-Policy: same-origin
+Cross-Origin-Embedder-Policy: credentialless
+```
+
+(`require-corp` works too, but `credentialless` is friendlier — it doesn't force every cross-origin resource to send `Cross-Origin-Resource-Policy`.)
+
+If the headers are missing, calling `box.run("python" | "node", ...)` with an `onInput` callback rejects with a clear error telling you what to fix. Iframe-based runners (C#, Java, PHP, Dart, Go) use async postMessage instead of `SharedArrayBuffer` and have no such requirement.
+
+```ts
+// Quick check before calling run()
+if (!window.crossOriginIsolated) {
+  console.warn("Interactive Python/Node input requires COOP/COEP headers");
+}
+```
+
+#### Can't set server headers? Use a service worker
+
+If you're deploying to a static host you don't control (GitHub Pages, Netlify free tier, etc.), a small service worker can inject the headers client-side. Drop the [`coi-serviceworker.js`](./coi-serviceworker.js) file in this repo at your site root and register it before anything else loads:
+
+```html
+<head>
+  <!-- Must come before any other script that needs SharedArrayBuffer -->
+  <script src="/coi-serviceworker.js"></script>
+  ...
+</head>
+```
+
+On first visit the page reloads once to activate the worker. After that, `window.crossOriginIsolated === true` and Python/Node interactive input works. The bundle [`docs/index.html`](./docs/index.html) demos both use this approach.
+
 ## Live demo
 
 Try the interactive playground at **[yaman-cyber.github.io/clientbox](https://yaman-cyber.github.io/clientbox/)** -- no install required, runs entirely in your browser.
@@ -305,8 +404,20 @@ type Language =
 interface RunOptions {
   files: Record<string, string>; // Virtual file path -> content
   entryPoint: string; // File to execute
-  stdin?: string; // Optional stdin
+  stdin?: string; // Pre-supplied stdin (consumed before onInput is called)
   timeout?: number; // Override timeout for this run
+
+  // Interactive input: called when the program requests a line of input.
+  // Return a string for the next line, or null to signal EOF.
+  // The `prompt` argument is the stdout produced since the last input request.
+  // See the "Interactive input" section above for per-language details and the
+  // cross-origin isolation requirement for the python/node runners.
+  onInput?: (prompt: string) => string | null | Promise<string | null>;
+
+  // Streamed output, chunk by chunk, as the program produces it.
+  // The final aggregated values are still returned in RunResult.stdout/stderr.
+  onStdout?: (chunk: string) => void;
+  onStderr?: (chunk: string) => void;
 }
 
 interface RunResult {
