@@ -43,6 +43,17 @@ self.onmessage = async function(e) {
   pyodide.setStdout({ batched: function(line) { stdout.push(line); } });
   pyodide.setStderr({ batched: function(line) { stderr.push(line); } });
 
+  var stdinLines = msg.stdin ? msg.stdin.split('\\n') : [];
+  var stdinIndex = 0;
+  pyodide.setStdin({
+    stdin: function() {
+      if (stdinIndex < stdinLines.length) {
+        return stdinLines[stdinIndex++] + '\\n';
+      }
+      return null;
+    }
+  });
+
   try {
     var files = msg.files;
     var entryPoint = msg.entryPoint;
