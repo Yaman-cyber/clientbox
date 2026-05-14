@@ -11,7 +11,9 @@
 if (typeof window === "undefined") {
   // Service worker context
   self.addEventListener("install", () => self.skipWaiting());
-  self.addEventListener("activate", (event) => event.waitUntil(self.clients.claim()));
+  self.addEventListener("activate", (event) =>
+    event.waitUntil(self.clients.claim()),
+  );
 
   self.addEventListener("message", (ev) => {
     if (ev.data && ev.data.type === "deregister") {
@@ -26,6 +28,13 @@ if (typeof window === "undefined") {
     const r = event.request;
     if (r.cache === "only-if-cached" && r.mode !== "same-origin") return;
 
+    // Only inject COOP/COEP headers on navigation (document) responses.
+    // Subresources (CDN scripts, images, fonts, etc.) must not be rewritten —
+    // doing so breaks credentials, caching, and opaque responses.
+    // Once the document carries COEP: credentialless the browser enforces
+    // credentialless loading on all subresources automatically.
+    if (r.mode !== "navigate") return;
+
     event.respondWith(
       fetch(r)
         .then((response) => {
@@ -39,7 +48,10 @@ if (typeof window === "undefined") {
             headers,
           });
         })
-        .catch((e) => console.error(e))
+        .catch((e) => {
+          console.error("[coi-sw] navigation fetch failed:", e);
+          return fetch(r);
+        }),
     );
   });
 } else {
@@ -54,12 +66,14 @@ if (typeof window === "undefined") {
 
     navigator.serviceWorker.register(swUrl).then(
       (registration) => {
-        registration.addEventListener("updatefound", () => window.location.reload());
+        registration.addEventListener("updatefound", () =>
+          window.location.reload(),
+        );
         if (registration.active && !navigator.serviceWorker.controller) {
           window.location.reload();
         }
       },
-      (err) => console.warn("[coi-sw] registration failed:", err)
+      (err) => console.warn("[coi-sw] registration failed:", err),
     );
   })();
 }
